@@ -1228,6 +1228,19 @@ public:
     return Feature == "or1k";
   }
 
+  virtual bool setFeatureEnabled(llvm::StringMap<bool> &Features,
+                                 StringRef Name,
+                                 bool Enabled) const {
+    if (Name == "mul" ||
+        Name == "div" ||
+        Name == "ror" ||
+        Name == "cmov") {
+      Features[Name] = Enabled;
+      return true;
+    }
+    return false;
+  }
+
   virtual const char *getVAListDeclaration() const {
     return "typedef char* __builtin_va_list;";
   }
