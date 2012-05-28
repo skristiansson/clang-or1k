@@ -39,17 +39,19 @@ int test6() {
 
 int test7(int y) {
   int x; // expected-note{{initialize the variable 'x' to silence this warning}}
-  if (y)
+  if (y) // expected-warning{{variable 'x' is used uninitialized whenever 'if' condition is false}} \
+         // expected-note{{remove the 'if' if its condition is always true}}
     x = 1;
-  return x; // expected-warning{{variable 'x' may be uninitialized when used here}}
+  return x; // expected-note{{uninitialized use occurs here}}
 }
 
 int test7b(int y) {
   int x = x; // expected-note{{variable 'x' is declared here}}
   if (y)
     x = 1;
-  // Warn with "may be uninitialized" here (not "is uninitialized"), since the
-  // self-initialization is intended to suppress a -Wuninitialized warning.
+  // Warn with "may be uninitialized" here (not "is sometimes uninitialized"),
+  // since the self-initialization is intended to suppress a -Wuninitialized
+  // warning.
   return x; // expected-warning{{variable 'x' may be uninitialized when used here}}
 }
 
@@ -293,8 +295,9 @@ int test40(int x) {
 
 int test41(int x) {
   int y; // expected-note{{initialize the variable 'y' to silence this warning}}
-  if (x) y = 1; // no-warning
-  return y; // expected-warning {{variable 'y' may be uninitialized when used here}}
+  if (x) y = 1; // expected-warning{{variable 'y' is used uninitialized whenever 'if' condition is false}} \
+                // expected-note{{remove the 'if' if its condition is always true}}
+  return y; // expected-note{{uninitialized use occurs here}}
 }
 
 void test42() {
@@ -423,4 +426,14 @@ void rdar9432305(float *P) {
   int i; // expected-note {{initialize the variable 'i' to silence this warning}}
   for (; i < 10000; ++i) // expected-warning {{variable 'i' is uninitialized when used here}}
     P[i] = 0.0f;
+}
+
+// Test that fixits are not emitted inside macros.
+#define UNINIT(T, x, y) T x; T y = x;
+#define ASSIGN(T, x, y) T y = x;
+void test54() {
+  UNINIT(int, a, b);  // expected-warning {{variable 'a' is uninitialized when used here}} \
+                      // expected-note {{variable 'a' is declared here}}
+  int c;  // expected-note {{initialize the variable 'c' to silence this warning}}
+  ASSIGN(int, c, d);  // expected-warning {{variable 'c' is uninitialized when used here}}
 }

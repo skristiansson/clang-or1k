@@ -27,6 +27,37 @@ llvm::SmallVector<*,*>{
 	)
 }
 
+llvm::SmallVectorImpl<*>{
+	preview (
+		#(
+			"[",
+			($T1*)$e.EndX - ($T1*)$e.BeginX,
+			"](",
+			#array(
+				expr: (($T1*)$e.BeginX)[$i],
+				size: ($T1*)$e.EndX - ($T1*)$e.BeginX
+			),
+			")"
+		)
+	)
+
+	children (
+		#(
+			#([size] : ($T1*)$e.EndX - ($T1*)$e.BeginX),
+			#([capacity] : ($T1*)$e.CapacityX - ($T1*)$e.BeginX),
+			#array(
+				expr: (($T1*)$e.BeginX)[$i],
+				size: ($T1*)$e.EndX - ($T1*)$e.BeginX
+			)
+		)
+	)
+}
+
+llvm::SmallString<*>{
+	preview ([$e.BeginX,s])
+	stringview ([$e.BeginX,sb])
+}
+
 llvm::StringRef{
 	preview ([$e.Data,s])
 	stringview ([$e.Data,sb])

@@ -102,14 +102,16 @@ CodeGenModule::CodeGenModule(ASTContext &C, const CodeGenOptions &CGO,
   if (LangOpts.CUDA)
     createCUDARuntime();
 
-  // Enable TBAA unless it's suppressed.
-  if (!CodeGenOpts.RelaxedAliasing && CodeGenOpts.OptimizationLevel > 0)
-    TBAA = new CodeGenTBAA(Context, VMContext, getLangOpts(),
+  // Enable TBAA unless it's suppressed. ThreadSanitizer needs TBAA even at O0.
+  if (LangOpts.ThreadSanitizer ||
+      (!CodeGenOpts.RelaxedAliasing && CodeGenOpts.OptimizationLevel > 0))
+    TBAA = new CodeGenTBAA(Context, VMContext, CodeGenOpts, getLangOpts(),
                            ABI.getMangleContext());
 
   // If debug info or coverage generation is enabled, create the CGDebugInfo
   // object.
-  if (CodeGenOpts.DebugInfo || CodeGenOpts.EmitGcovArcs ||
+  if (CodeGenOpts.DebugInfo != CodeGenOptions::NoDebugInfo ||
+      CodeGenOpts.EmitGcovArcs ||
       CodeGenOpts.EmitGcovNotes)
     DebugInfo = new CGDebugInfo(*this);
 
@@ -474,8 +476,7 @@ void CodeGenModule::SetLLVMFunctionAttributes(const Decl *D,
   unsigned CallingConv;
   AttributeListType AttributeList;
   ConstructAttributeList(Info, D, AttributeList, CallingConv);
-  F->setAttributes(llvm::AttrListPtr::get(AttributeList.begin(),
-                                          AttributeList.size()));
+  F->setAttributes(llvm::AttrListPtr::get(AttributeList));
   F->setCallingConv(static_cast<llvm::CallingConv::ID>(CallingConv));
 }
 
@@ -520,6 +521,10 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
   if (D->hasAttr<AlwaysInlineAttr>() &&
       !F->hasFnAttr(llvm::Attribute::NoInline))
     F->addFnAttr(llvm::Attribute::AlwaysInline);
+
+  // FIXME: Communicate hot and cold attributes to LLVM more directly.
+  if (D->hasAttr<ColdAttr>())
+    F->addFnAttr(llvm::Attribute::OptimizeForSize);
 
   if (isa<CXXConstructorDecl>(D) || isa<CXXDestructorDecl>(D))
     F->setUnnamedAddr(true);
@@ -1166,11 +1171,12 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName,
     DeferredDecls.erase(DDI);
   }
 
+  unsigned AddrSpace = GetGlobalVarAddressSpace(D, Ty->getAddressSpace());
   llvm::GlobalVariable *GV =
     new llvm::GlobalVariable(getModule(), Ty->getElementType(), false,
                              llvm::GlobalValue::ExternalLinkage,
                              0, MangledName, 0,
-                             false, Ty->getAddressSpace());
+                             false, AddrSpace);
 
   // Handle things which are present even on external declarations.
   if (D) {
@@ -1196,7 +1202,10 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName,
     GV->setThreadLocal(D->isThreadSpecified());
   }
 
-  return GV;
+  if (AddrSpace != Ty->getAddressSpace())
+    return llvm::ConstantExpr::getBitCast(GV, Ty);
+  else
+    return GV;
 }
 
 
@@ -1241,7 +1250,7 @@ CodeGenModule::CreateOrReplaceCXXRuntimeVariable(StringRef Name,
 
 /// GetAddrOfGlobalVar - Return the llvm::Constant for the address of the
 /// given global variable.  If Ty is non-null and if the global doesn't exist,
-/// then it will be greated with the specified type instead of whatever the
+/// then it will be created with the specified type instead of whatever the
 /// normal requested type would be.
 llvm::Constant *CodeGenModule::GetAddrOfGlobalVar(const VarDecl *D,
                                                   llvm::Type *Ty) {
@@ -1481,6 +1490,20 @@ CodeGenModule::MaybeEmitGlobalStdInitializerListInitializer(const VarDecl *D,
   return llvmInit;
 }
 
+unsigned CodeGenModule::GetGlobalVarAddressSpace(const VarDecl *D,
+                                                 unsigned AddrSpace) {
+  if (LangOpts.CUDA && CodeGenOpts.CUDAIsDevice) {
+    if (D->hasAttr<CUDAConstantAttr>())
+      AddrSpace = getContext().getTargetAddressSpace(LangAS::cuda_constant);
+    else if (D->hasAttr<CUDASharedAttr>())
+      AddrSpace = getContext().getTargetAddressSpace(LangAS::cuda_shared);
+    else
+      AddrSpace = getContext().getTargetAddressSpace(LangAS::cuda_device);
+  }
+
+  return AddrSpace;
+}
+
 void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
   llvm::Constant *Init = 0;
   QualType ASTTy = D->getType();
@@ -1560,7 +1583,7 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
   if (GV == 0 ||
       GV->getType()->getElementType() != InitType ||
       GV->getType()->getAddressSpace() !=
-        getContext().getTargetAddressSpace(ASTTy)) {
+       GetGlobalVarAddressSpace(D, getContext().getTargetAddressSpace(ASTTy))) {
 
     // Move the old entry aside so that we'll create a new one.
     Entry->setName(StringRef());
@@ -1604,7 +1627,8 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
 
   // Emit global variable debug information.
   if (CGDebugInfo *DI = getModuleDebugInfo())
-    DI->EmitGlobalVariable(GV, D);
+    if (getCodeGenOpts().DebugInfo >= CodeGenOptions::LimitedDebugInfo)
+      DI->EmitGlobalVariable(GV, D);
 }
 
 llvm::GlobalValue::LinkageTypes
@@ -1710,8 +1734,7 @@ static void ReplaceUsesOfNonProtoTypeWithRealFunction(llvm::GlobalValue *Old,
     ArgList.clear();
     if (!NewCall->getType()->isVoidTy())
       NewCall->takeName(CI);
-    NewCall->setAttributes(llvm::AttrListPtr::get(AttrVec.begin(),
-                                                  AttrVec.end()));
+    NewCall->setAttributes(llvm::AttrListPtr::get(AttrVec));
     NewCall->setCallingConv(CI->getCallingConv());
 
     // Finally, remove the old call, replacing any uses with the new one.
@@ -2342,7 +2365,7 @@ void CodeGenModule::EmitObjCPropertyImplementations(const
                                                     ObjCImplementationDecl *D) {
   for (ObjCImplementationDecl::propimpl_iterator
          i = D->propimpl_begin(), e = D->propimpl_end(); i != e; ++i) {
-    ObjCPropertyImplDecl *PID = *i;
+    ObjCPropertyImplDecl *PID = &*i;
 
     // Dynamic is just for type-checking.
     if (PID->getPropertyImplementation() == ObjCPropertyImplDecl::Synthesize) {
@@ -2535,6 +2558,11 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
     EmitObjCPropertyImplementations(OMD);
     EmitObjCIvarInitializations(OMD);
     ObjCRuntime->GenerateClass(OMD);
+    // Emit global variable debug information.
+    if (CGDebugInfo *DI = getModuleDebugInfo())
+      DI->getOrCreateInterfaceType(getContext().getObjCInterfaceType(OMD->getClassInterface()),
+				   OMD->getLocation());
+    
     break;
   }
   case Decl::ObjCMethod: {

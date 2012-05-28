@@ -1002,9 +1002,9 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
   }
   
   // Check the fields for consistency.
-  CXXRecordDecl::field_iterator Field2 = D2->field_begin(),
+  RecordDecl::field_iterator Field2 = D2->field_begin(),
                              Field2End = D2->field_end();
-  for (CXXRecordDecl::field_iterator Field1 = D1->field_begin(),
+  for (RecordDecl::field_iterator Field1 = D1->field_begin(),
                                   Field1End = D1->field_end();
        Field1 != Field1End;
        ++Field1, ++Field2) {
@@ -1017,7 +1017,7 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
       return false;
     }
     
-    if (!IsStructurallyEquivalent(Context, *Field1, *Field2))
+    if (!IsStructurallyEquivalent(Context, &*Field1, &*Field2))
       return false;    
   }
   
@@ -1852,6 +1852,7 @@ bool ASTNodeImporter::ImportDefinition(RecordDecl *From, RecordDecl *To,
     ToData.HasPublicFields = FromData.HasPublicFields;
     ToData.HasMutableFields = FromData.HasMutableFields;
     ToData.HasOnlyCMembers = FromData.HasOnlyCMembers;
+    ToData.HasInClassInitializer = FromData.HasInClassInitializer;
     ToData.HasTrivialDefaultConstructor = FromData.HasTrivialDefaultConstructor;
     ToData.HasConstexprNonCopyMoveConstructor
       = FromData.HasConstexprNonCopyMoveConstructor;

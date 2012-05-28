@@ -17,7 +17,7 @@ This test serves two purposes:
 
 The list of warnings below should NEVER grow.  It should gradually shrink to 0.
 
-CHECK: Warnings without flags (253):
+CHECK: Warnings without flags (242):
 CHECK-NEXT:   ext_anonymous_struct_union_qualified
 CHECK-NEXT:   ext_binary_literal
 CHECK-NEXT:   ext_cast_fn_obj
@@ -33,8 +33,6 @@ CHECK-NEXT:   ext_enumerator_list_comma
 CHECK-NEXT:   ext_expected_semi_decl_list
 CHECK-NEXT:   ext_explicit_instantiation_without_qualified_id
 CHECK-NEXT:   ext_explicit_specialization_storage_class
-CHECK-NEXT:   ext_extra_ivar_semi
-CHECK-NEXT:   ext_extra_struct_semi
 CHECK-NEXT:   ext_forward_ref_enum
 CHECK-NEXT:   ext_freestanding_complex
 CHECK-NEXT:   ext_hexconstant_invalid
@@ -65,7 +63,6 @@ CHECK-NEXT:   ext_return_has_void_expr
 CHECK-NEXT:   ext_subscript_non_lvalue
 CHECK-NEXT:   ext_template_arg_extra_parens
 CHECK-NEXT:   ext_thread_before
-CHECK-NEXT:   ext_top_level_semi
 CHECK-NEXT:   ext_typecheck_addrof_void
 CHECK-NEXT:   ext_typecheck_cast_nonscalar
 CHECK-NEXT:   ext_typecheck_cast_to_union
@@ -112,9 +109,6 @@ CHECK-NEXT:   warn_attribute_weak_import_invalid_on_definition
 CHECK-NEXT:   warn_attribute_weak_on_field
 CHECK-NEXT:   warn_attribute_weak_on_local
 CHECK-NEXT:   warn_attribute_wrong_decl_type
-CHECK-NEXT:   warn_availability_and_unavailable
-CHECK-NEXT:   warn_availability_unknown_platform
-CHECK-NEXT:   warn_availability_version_ordering
 CHECK-NEXT:   warn_bad_receiver_type
 CHECK-NEXT:   warn_bitfield_width_exceeds_type_size
 CHECK-NEXT:   warn_bool_switch_condition
@@ -133,9 +127,7 @@ CHECK-NEXT:   warn_conflicting_variadic
 CHECK-NEXT:   warn_conv_to_base_not_used
 CHECK-NEXT:   warn_conv_to_self_not_used
 CHECK-NEXT:   warn_conv_to_void_not_used
-CHECK-NEXT:   warn_cxx0x_right_shift_in_template_arg
 CHECK-NEXT:   warn_delete_array_type
-CHECK-NEXT:   warn_division_by_zero
 CHECK-NEXT:   warn_double_const_requires_fp64
 CHECK-NEXT:   warn_drv_assuming_mfloat_abi_is
 CHECK-NEXT:   warn_drv_clang_unsupported
@@ -193,8 +185,6 @@ CHECK-NEXT:   warn_ns_attribute_wrong_parameter_type
 CHECK-NEXT:   warn_ns_attribute_wrong_return_type
 CHECK-NEXT:   warn_objc_object_attribute_wrong_type
 CHECK-NEXT:   warn_objc_property_copy_missing_on_block
-CHECK-NEXT:   warn_objc_property_default_assign_on_object
-CHECK-NEXT:   warn_objc_property_no_assignment_attribute
 CHECK-NEXT:   warn_objc_protocol_qualifier_missing_id
 CHECK-NEXT:   warn_octal_escape_too_large
 CHECK-NEXT:   warn_odr_tag_type_inconsistent
@@ -244,7 +234,6 @@ CHECK-NEXT:   warn_redeclaration_without_attribute_prev_attribute_ignored
 CHECK-NEXT:   warn_register_objc_catch_parm
 CHECK-NEXT:   warn_related_result_type_compatibility_class
 CHECK-NEXT:   warn_related_result_type_compatibility_protocol
-CHECK-NEXT:   warn_remainder_by_zero
 CHECK-NEXT:   warn_root_inst_method_not_found
 CHECK-NEXT:   warn_second_parameter_of_va_start_not_last_named_argument
 CHECK-NEXT:   warn_second_parameter_to_va_arg_never_compatible

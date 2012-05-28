@@ -557,6 +557,7 @@ public:
   CanQualType BoolTy;
   CanQualType CharTy;
   CanQualType WCharTy;  // [C++ 3.9.1p5], integer type in C99.
+  CanQualType WIntTy;   // [C99 7.24.1], integer type unchanged by default promotions.
   CanQualType Char16Ty; // [C++0x 3.9.1p5], integer type in C99.
   CanQualType Char32Ty; // [C++0x 3.9.1p5], integer type in C99.
   CanQualType SignedCharTy, ShortTy, IntTy, LongTy, LongLongTy, Int128Ty;
@@ -928,6 +929,10 @@ public:
   /// getUnsignedWCharType - Return the type of "unsigned wchar_t".
   /// Used when in C++, as a GCC extension.
   QualType getUnsignedWCharType() const;
+
+  /// getWIntType - In C99, this returns a type compatible with the type
+  /// defined in <stddef.h> as defined by the target.
+  QualType getWIntType() const { return WIntTy; }
 
   /// getPointerDiffType - Return the unique type for "ptrdiff_t" (C99 7.17)
   /// defined in <stddef.h>. Pointer - pointer requires this (C99 6.5.6p9).
@@ -1523,12 +1528,12 @@ public:
   /// This routine adjusts the given parameter type @p T to the actual
   /// parameter type used by semantic analysis (C99 6.7.5.3p[7,8],
   /// C++ [dcl.fct]p3). The adjusted parameter type is returned.
-  QualType getAdjustedParameterType(QualType T);
+  QualType getAdjustedParameterType(QualType T) const;
   
   /// \brief Retrieve the parameter type as adjusted for use in the signature
   /// of a function, decaying array and function types and removing top-level
   /// cv-qualifiers.
-  QualType getSignatureParameterType(QualType T);
+  QualType getSignatureParameterType(QualType T) const;
   
   /// getArrayDecayedType - Return the properly qualified result of decaying the
   /// specified array type to a pointer.  This operation is non-trivial when
@@ -1716,15 +1721,12 @@ public:
   /// interface, or null if non exists.
   const ObjCMethodDecl *getObjCMethodRedeclaration(
                                                const ObjCMethodDecl *MD) const {
-    llvm::DenseMap<const ObjCMethodDecl*, const ObjCMethodDecl*>::const_iterator
-      I = ObjCMethodRedecls.find(MD);
-    if (I == ObjCMethodRedecls.end())
-      return 0;
-    return I->second;
+    return ObjCMethodRedecls.lookup(MD);
   }
 
   void setObjCMethodRedeclaration(const ObjCMethodDecl *MD,
                                   const ObjCMethodDecl *Redecl) {
+    assert(!getObjCMethodRedeclaration(MD) && "MD already has a redeclaration");
     ObjCMethodRedecls[MD] = Redecl;
   }
 

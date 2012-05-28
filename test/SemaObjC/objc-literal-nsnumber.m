@@ -76,3 +76,14 @@ NSDictionary * warn() {
                                @"date" : [NSDate date] };
   return dictionary3;
 }
+
+// rdar:// 11231426
+typedef float BOOL;
+
+BOOL radar11231426() {
+        return __objc_yes;
+}
+
+id stringBoxingNoSuchMethod(const char *str) {
+  return @(str); // expected-error {{declaration of 'stringWithUTF8String:' is missing in NSString class}}
+}

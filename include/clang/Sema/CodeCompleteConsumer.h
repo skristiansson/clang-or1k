@@ -501,8 +501,6 @@ public:
 
 /// \brief An allocator used specifically for the purpose of code completion.
 class CodeCompletionAllocator : public llvm::BumpPtrAllocator {
-  llvm::DenseMap<DeclContext *, StringRef> ParentNames;
-  
 public:
   /// \brief Copy the given string into this allocator.
   const char *CopyString(StringRef String);
@@ -519,12 +517,34 @@ public:
   const char *CopyString(const std::string &String) {
     return CopyString(StringRef(String));
   }
-  
-  /// \brief Retrieve the mapping from known parent declaration contexts to
-  /// the (already copied) strings associated with each context.
-  llvm::DenseMap<DeclContext *, StringRef> &getParentNames() {
-    return ParentNames;
+};
+
+/// \brief Allocator for a cached set of global code completions.
+class GlobalCodeCompletionAllocator 
+  : public CodeCompletionAllocator,
+    public RefCountedBase<GlobalCodeCompletionAllocator>
+{
+
+};
+
+class CodeCompletionTUInfo {
+  llvm::DenseMap<DeclContext *, StringRef> ParentNames;
+  IntrusiveRefCntPtr<GlobalCodeCompletionAllocator> AllocatorRef;
+
+public:
+  explicit CodeCompletionTUInfo(
+                    IntrusiveRefCntPtr<GlobalCodeCompletionAllocator> Allocator)
+    : AllocatorRef(Allocator) { }
+
+  IntrusiveRefCntPtr<GlobalCodeCompletionAllocator> getAllocatorRef() const {
+    return AllocatorRef;
   }
+  CodeCompletionAllocator &getAllocator() const {
+    assert(AllocatorRef);
+    return *AllocatorRef;
+  }
+
+  StringRef getParentName(DeclContext *DC);
 };
 
 } // end namespace clang
@@ -544,6 +564,7 @@ public:
 
 private:
   CodeCompletionAllocator &Allocator;
+  CodeCompletionTUInfo &CCTUInfo;
   unsigned Priority;
   CXAvailabilityKind Availability;
   CXCursorKind ParentKind;
@@ -555,18 +576,24 @@ private:
   SmallVector<const char *, 2> Annotations;
 
 public:
-  CodeCompletionBuilder(CodeCompletionAllocator &Allocator)
-    : Allocator(Allocator), Priority(0), Availability(CXAvailability_Available),
+  CodeCompletionBuilder(CodeCompletionAllocator &Allocator,
+                        CodeCompletionTUInfo &CCTUInfo)
+    : Allocator(Allocator), CCTUInfo(CCTUInfo),
+      Priority(0), Availability(CXAvailability_Available),
       ParentKind(CXCursor_NotImplemented) { }
 
   CodeCompletionBuilder(CodeCompletionAllocator &Allocator,
+                        CodeCompletionTUInfo &CCTUInfo,
                         unsigned Priority, CXAvailabilityKind Availability)
-    : Allocator(Allocator), Priority(Priority), Availability(Availability),
+    : Allocator(Allocator), CCTUInfo(CCTUInfo),
+      Priority(Priority), Availability(Availability),
       ParentKind(CXCursor_NotImplemented) { }
 
   /// \brief Retrieve the allocator into which the code completion
   /// strings should be allocated.
   CodeCompletionAllocator &getAllocator() const { return Allocator; }
+
+  CodeCompletionTUInfo &getCodeCompletionTUInfo() const { return CCTUInfo; }
 
   /// \brief Take the resulting completion string.
   ///
@@ -617,9 +644,6 @@ public:
     RK_Pattern          //< Refers to a precomputed pattern.
   };
 
-  /// \brief The kind of result stored here.
-  ResultKind Kind;
-
   /// \brief When Kind == RK_Declaration or RK_Pattern, the declaration we are
   /// referring to. In the latter case, the declaration might be NULL.
   NamedDecl *Declaration;
@@ -640,15 +664,18 @@ public:
   /// \brief The priority of this particular code-completion result.
   unsigned Priority;
 
+  /// \brief Specifies which parameter (of a function, Objective-C method,
+  /// macro, etc.) we should start with when formatting the result.
+  unsigned StartParameter;
+
+  /// \brief The kind of result stored here.
+  ResultKind Kind;
+
   /// \brief The cursor kind that describes this result.
   CXCursorKind CursorKind;
 
   /// \brief The availability of this result.
   CXAvailabilityKind Availability;
-
-  /// \brief Specifies which parameter (of a function, Objective-C method,
-  /// macro, etc.) we should start with when formatting the result.
-  unsigned StartParameter;
 
   /// \brief Whether this result is hidden by another name.
   bool Hidden : 1;
@@ -678,10 +705,10 @@ public:
                        NestedNameSpecifier *Qualifier = 0,
                        bool QualifierIsInformative = false,
                        bool Accessible = true)
-    : Kind(RK_Declaration), Declaration(Declaration),
-      Priority(getPriorityFromDecl(Declaration)),
-      Availability(CXAvailability_Available), StartParameter(0),
-      Hidden(false), QualifierIsInformative(QualifierIsInformative),
+    : Declaration(Declaration), Priority(getPriorityFromDecl(Declaration)),
+      StartParameter(0), Kind(RK_Declaration),
+      Availability(CXAvailability_Available), Hidden(false),
+      QualifierIsInformative(QualifierIsInformative),
       StartsNestedNameSpecifier(false), AllParametersAreInformative(false),
       DeclaringEntity(false), Qualifier(Qualifier) {
     computeCursorKindAndAvailability(Accessible);
@@ -689,22 +716,22 @@ public:
 
   /// \brief Build a result that refers to a keyword or symbol.
   CodeCompletionResult(const char *Keyword, unsigned Priority = CCP_Keyword)
-    : Kind(RK_Keyword), Declaration(0), Keyword(Keyword), Priority(Priority),
-      Availability(CXAvailability_Available),
-      StartParameter(0), Hidden(false), QualifierIsInformative(0),
-      StartsNestedNameSpecifier(false), AllParametersAreInformative(false),
-      DeclaringEntity(false), Qualifier(0) {
-    computeCursorKindAndAvailability();
+    : Declaration(0), Keyword(Keyword), Priority(Priority), StartParameter(0),
+      Kind(RK_Keyword), CursorKind(CXCursor_NotImplemented),
+      Availability(CXAvailability_Available), Hidden(false),
+      QualifierIsInformative(0), StartsNestedNameSpecifier(false),
+      AllParametersAreInformative(false), DeclaringEntity(false), Qualifier(0)
+  {
   }
 
   /// \brief Build a result that refers to a macro.
   CodeCompletionResult(IdentifierInfo *Macro, unsigned Priority = CCP_Macro)
-    : Kind(RK_Macro), Declaration(0), Macro(Macro), Priority(Priority),
-      Availability(CXAvailability_Available), StartParameter(0),
-      Hidden(false), QualifierIsInformative(0),
-      StartsNestedNameSpecifier(false), AllParametersAreInformative(false),
-      DeclaringEntity(false), Qualifier(0) {
-    computeCursorKindAndAvailability();
+    : Declaration(0), Macro(Macro), Priority(Priority), StartParameter(0),
+      Kind(RK_Macro), CursorKind(CXCursor_MacroDefinition),
+      Availability(CXAvailability_Available), Hidden(false),
+      QualifierIsInformative(0), StartsNestedNameSpecifier(false),
+      AllParametersAreInformative(false), DeclaringEntity(false), Qualifier(0)
+  {
   }
 
   /// \brief Build a result that refers to a pattern.
@@ -713,8 +740,8 @@ public:
                        CXCursorKind CursorKind = CXCursor_NotImplemented,
                    CXAvailabilityKind Availability = CXAvailability_Available,
                        NamedDecl *D = 0)
-    : Kind(RK_Pattern), Declaration(D), Pattern(Pattern), Priority(Priority),
-      CursorKind(CursorKind), Availability(Availability), StartParameter(0),
+    : Declaration(D), Pattern(Pattern), Priority(Priority), StartParameter(0),
+      Kind(RK_Pattern), CursorKind(CursorKind), Availability(Availability),
       Hidden(false), QualifierIsInformative(0),
       StartsNestedNameSpecifier(false), AllParametersAreInformative(false),
       DeclaringEntity(false), Qualifier(0)
@@ -725,11 +752,10 @@ public:
   /// declaration.
   CodeCompletionResult(CodeCompletionString *Pattern, NamedDecl *D,
                        unsigned Priority)
-    : Kind(RK_Pattern), Declaration(D), Pattern(Pattern), Priority(Priority),
-      Availability(CXAvailability_Available), StartParameter(0),
-      Hidden(false), QualifierIsInformative(false),
-      StartsNestedNameSpecifier(false), AllParametersAreInformative(false),
-      DeclaringEntity(false), Qualifier(0) {
+    : Declaration(D), Pattern(Pattern), Priority(Priority), StartParameter(0),
+      Kind(RK_Pattern), Availability(CXAvailability_Available), Hidden(false),
+      QualifierIsInformative(false), StartsNestedNameSpecifier(false),
+      AllParametersAreInformative(false), DeclaringEntity(false), Qualifier(0) {
     computeCursorKindAndAvailability();
   }  
   
@@ -753,10 +779,12 @@ public:
   /// \param Allocator The allocator that will be used to allocate the
   /// string itself.
   CodeCompletionString *CreateCodeCompletionString(Sema &S,
-                                           CodeCompletionAllocator &Allocator);
+                                           CodeCompletionAllocator &Allocator,
+                                           CodeCompletionTUInfo &CCTUInfo);
   CodeCompletionString *CreateCodeCompletionString(ASTContext &Ctx,
                                                    Preprocessor &PP,
-                                           CodeCompletionAllocator &Allocator);
+                                           CodeCompletionAllocator &Allocator,
+                                           CodeCompletionTUInfo &CCTUInfo);
 
   /// \brief Determine a base priority for the given declaration.
   static unsigned getPriorityFromDecl(NamedDecl *ND);
@@ -868,7 +896,8 @@ public:
     /// signature of this overload candidate.
     CodeCompletionString *CreateSignatureString(unsigned CurrentArg,
                                                 Sema &S,
-                                      CodeCompletionAllocator &Allocator) const;
+                                      CodeCompletionAllocator &Allocator,
+                                      CodeCompletionTUInfo &CCTUInfo) const;
   };
 
   CodeCompleteConsumer() : IncludeMacros(false), IncludeCodePatterns(false),
@@ -918,6 +947,8 @@ public:
   /// \brief Retrieve the allocator that will be used to allocate
   /// code completion strings.
   virtual CodeCompletionAllocator &getAllocator() = 0;
+
+  virtual CodeCompletionTUInfo &getCodeCompletionTUInfo() = 0;
 };
 
 /// \brief A simple code-completion consumer that prints the results it
@@ -926,7 +957,7 @@ class PrintingCodeCompleteConsumer : public CodeCompleteConsumer {
   /// \brief The raw output stream.
   raw_ostream &OS;
 
-  CodeCompletionAllocator Allocator;
+  CodeCompletionTUInfo CCTUInfo;
 
 public:
   /// \brief Create a new printing code-completion consumer that prints its
@@ -935,7 +966,8 @@ public:
                                bool IncludeGlobals,
                                raw_ostream &OS)
     : CodeCompleteConsumer(IncludeMacros, IncludeCodePatterns, IncludeGlobals,
-                           false), OS(OS) {}
+                           false), OS(OS),
+      CCTUInfo(new GlobalCodeCompletionAllocator) {}
 
   /// \brief Prints the finalized code-completion results.
   virtual void ProcessCodeCompleteResults(Sema &S,
@@ -947,7 +979,11 @@ public:
                                          OverloadCandidate *Candidates,
                                          unsigned NumCandidates);
 
-  virtual CodeCompletionAllocator &getAllocator() { return Allocator; }
+  virtual CodeCompletionAllocator &getAllocator() {
+    return CCTUInfo.getAllocator();
+  }
+
+  virtual CodeCompletionTUInfo &getCodeCompletionTUInfo() { return CCTUInfo; }
 };
 
 } // end namespace clang

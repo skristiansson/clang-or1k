@@ -316,6 +316,8 @@ protected:
     DefineStd(Builder, "linux", Opts);
     Builder.defineMacro("__gnu_linux__");
     Builder.defineMacro("__ELF__");
+    if (Triple.getEnvironment() == llvm::Triple::ANDROIDEABI)
+      Builder.defineMacro("__ANDROID__", "1");
     if (Opts.POSIXThreads)
       Builder.defineMacro("_REENTRANT");
     if (Opts.CPlusPlus)
@@ -365,7 +367,7 @@ protected:
     DefineStd(Builder, "unix", Opts);
     Builder.defineMacro("__ELF__");
     if (Opts.POSIXThreads)
-      Builder.defineMacro("_POSIX_THREADS");
+      Builder.defineMacro("_REENTRANT");
   }
 public:
   OpenBSDTargetInfo(const std::string &triple)
@@ -944,54 +946,39 @@ public:
 } // end anonymous namespace.
 
 namespace {
-  static const unsigned PTXAddrSpaceMap[] = {
-    0,    // opencl_global
-    4,    // opencl_local
-    1     // opencl_constant
+  static const unsigned NVPTXAddrSpaceMap[] = {
+    1,    // opencl_global
+    3,    // opencl_local
+    4,    // opencl_constant
+    1,    // cuda_device
+    4,    // cuda_constant
+    3,    // cuda_shared
   };
-  class PTXTargetInfo : public TargetInfo {
+  class NVPTXTargetInfo : public TargetInfo {
     static const char * const GCCRegNames[];
     static const Builtin::Info BuiltinInfo[];
     std::vector<llvm::StringRef> AvailableFeatures;
   public:
-    PTXTargetInfo(const std::string& triple) : TargetInfo(triple) {
+    NVPTXTargetInfo(const std::string& triple) : TargetInfo(triple) {
       BigEndian = false;
       TLSSupported = false;
       LongWidth = LongAlign = 64;
-      AddrSpaceMap = &PTXAddrSpaceMap;
+      AddrSpaceMap = &NVPTXAddrSpaceMap;
       // Define available target features
-      // These must be defined in sorted order!      
-      AvailableFeatures.push_back("compute10");
-      AvailableFeatures.push_back("compute11");
-      AvailableFeatures.push_back("compute12");
-      AvailableFeatures.push_back("compute13");
-      AvailableFeatures.push_back("compute20");
-      AvailableFeatures.push_back("double");
-      AvailableFeatures.push_back("no-fma");
-      AvailableFeatures.push_back("ptx20");
-      AvailableFeatures.push_back("ptx21");
-      AvailableFeatures.push_back("ptx22");
-      AvailableFeatures.push_back("ptx23");
-      AvailableFeatures.push_back("sm10");
-      AvailableFeatures.push_back("sm11");
-      AvailableFeatures.push_back("sm12");
-      AvailableFeatures.push_back("sm13");
-      AvailableFeatures.push_back("sm20");
-      AvailableFeatures.push_back("sm21");
-      AvailableFeatures.push_back("sm22");
-      AvailableFeatures.push_back("sm23");
+      // These must be defined in sorted order!
     }
     virtual void getTargetDefines(const LangOptions &Opts,
                                   MacroBuilder &Builder) const {
       Builder.defineMacro("__PTX__");
+      Builder.defineMacro("__NVPTX__");
     }
     virtual void getTargetBuiltins(const Builtin::Info *&Records,
                                    unsigned &NumRecords) const {
       Records = BuiltinInfo;
-      NumRecords = clang::PTX::LastTSBuiltin-Builtin::FirstTSBuiltin;
+      NumRecords = clang::NVPTX::LastTSBuiltin-Builtin::FirstTSBuiltin;
     }
     virtual bool hasFeature(StringRef Feature) const {
-      return Feature == "ptx";
+      return Feature == "ptx" || Feature == "nvptx";
     }
     
     virtual void getGCCRegNames(const char * const *&Names,
@@ -1015,32 +1002,34 @@ namespace {
       // FIXME: implement
       return "typedef char* __builtin_va_list;";
     }
-
+    virtual bool setCPU(const std::string &Name) {
+      return Name == "sm_10" || Name == "sm_13" || Name == "sm_20";
+    }
     virtual bool setFeatureEnabled(llvm::StringMap<bool> &Features,
                                    StringRef Name,
                                    bool Enabled) const;
   };
 
-  const Builtin::Info PTXTargetInfo::BuiltinInfo[] = {
+  const Builtin::Info NVPTXTargetInfo::BuiltinInfo[] = {
 #define BUILTIN(ID, TYPE, ATTRS) { #ID, TYPE, ATTRS, 0, ALL_LANGUAGES },
 #define LIBBUILTIN(ID, TYPE, ATTRS, HEADER) { #ID, TYPE, ATTRS, HEADER,\
                                               ALL_LANGUAGES },
-#include "clang/Basic/BuiltinsPTX.def"
+#include "clang/Basic/BuiltinsNVPTX.def"
   };
 
-  const char * const PTXTargetInfo::GCCRegNames[] = {
+  const char * const NVPTXTargetInfo::GCCRegNames[] = {
     "r0"
   };
 
-  void PTXTargetInfo::getGCCRegNames(const char * const *&Names,
+  void NVPTXTargetInfo::getGCCRegNames(const char * const *&Names,
                                      unsigned &NumNames) const {
     Names = GCCRegNames;
     NumNames = llvm::array_lengthof(GCCRegNames);
   }
 
-  bool PTXTargetInfo::setFeatureEnabled(llvm::StringMap<bool> &Features,
-                                        StringRef Name,
-                                        bool Enabled) const {
+  bool NVPTXTargetInfo::setFeatureEnabled(llvm::StringMap<bool> &Features,
+                                          StringRef Name,
+                                          bool Enabled) const {
     if(std::binary_search(AvailableFeatures.begin(), AvailableFeatures.end(),
                           Name)) {
       Features[Name] = Enabled;
@@ -1050,24 +1039,28 @@ namespace {
     }
   }
 
-  class PTX32TargetInfo : public PTXTargetInfo {
+  class NVPTX32TargetInfo : public NVPTXTargetInfo {
   public:
-  PTX32TargetInfo(const std::string& triple) : PTXTargetInfo(triple) {
+    NVPTX32TargetInfo(const std::string& triple) : NVPTXTargetInfo(triple) {
       PointerWidth = PointerAlign = 32;
-      SizeType = PtrDiffType = IntPtrType = TargetInfo::UnsignedInt;
+      SizeType     = PtrDiffType = IntPtrType = TargetInfo::UnsignedInt;
       DescriptionString
-        = "e-p:32:32-i64:64:64-f64:64:64-n1:8:16:32:64";
-    }
+        = "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-"
+          "f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-"
+          "n16:32:64";
+  }
   };
 
-  class PTX64TargetInfo : public PTXTargetInfo {
+  class NVPTX64TargetInfo : public NVPTXTargetInfo {
   public:
-  PTX64TargetInfo(const std::string& triple) : PTXTargetInfo(triple) {
+    NVPTX64TargetInfo(const std::string& triple) : NVPTXTargetInfo(triple) {
       PointerWidth = PointerAlign = 64;
-      SizeType = PtrDiffType = IntPtrType = TargetInfo::UnsignedLongLong;
+      SizeType     = PtrDiffType = IntPtrType = TargetInfo::UnsignedLongLong;
       DescriptionString
-        = "e-p:64:64-i64:64:64-f64:64:64-n1:8:16:32:64";
-    }
+        = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-"
+          "f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-"
+          "n16:32:64";
+  }
   };
 }
 
@@ -1745,18 +1738,16 @@ void X86TargetInfo::getDefaultFeatures(llvm::StringMap<bool> &Features) const {
   case CK_Corei7AVX:
   case CK_CoreAVXi:
     setFeatureEnabled(Features, "mmx", true);
-    setFeatureEnabled(Features, "sse4", true);
+    setFeatureEnabled(Features, "avx", true);
     setFeatureEnabled(Features, "aes", true);
-    //setFeatureEnabled(Features, "avx", true);
     break;
   case CK_CoreAVX2:
     setFeatureEnabled(Features, "mmx", true);
-    setFeatureEnabled(Features, "sse4", true);
+    setFeatureEnabled(Features, "avx2", true);
     setFeatureEnabled(Features, "aes", true);
     setFeatureEnabled(Features, "lzcnt", true);
     setFeatureEnabled(Features, "bmi", true);
     setFeatureEnabled(Features, "bmi2", true);
-    //setFeatureEnabled(Features, "avx2", true);
     break;
   case CK_K6:
   case CK_WinChipC6:
@@ -1802,7 +1793,7 @@ void X86TargetInfo::getDefaultFeatures(llvm::StringMap<bool> &Features) const {
     setFeatureEnabled(Features, "sse4a", true);
   case CK_BDVER1:
   case CK_BDVER2:
-    setFeatureEnabled(Features, "sse4", true);
+    setFeatureEnabled(Features, "avx", true);
     setFeatureEnabled(Features, "sse4a", true);
     setFeatureEnabled(Features, "aes", true);
     break;
@@ -3118,8 +3109,8 @@ public:
   HexagonTargetInfo(const std::string& triple) : TargetInfo(triple)  {
     BigEndian = false;
     DescriptionString = ("e-p:32:32:32-"
-                         "i64:64:64-i32:32:32-"
-                         "i16:16:16-i1:32:32-a:0:0");
+                         "i64:64:64-i32:32:32-i16:16:16-i1:32:32"
+                         "f64:64:64-f32:32:32-a0:0-n32");
 
     // {} in inline assembly are packet specifiers, not assembly variant
     // specifiers.
@@ -3160,6 +3151,7 @@ public:
       .Case("hexagonv2", "2")
       .Case("hexagonv3", "3")
       .Case("hexagonv4", "4")
+      .Case("hexagonv5", "5")
       .Default(0);
   }
 
@@ -3212,6 +3204,14 @@ void HexagonTargetInfo::getTargetDefines(const LangOptions &Opts,
     if(Opts.HexagonQdsp6Compat) {
       Builder.defineMacro("__QDSP6_V4__");
       Builder.defineMacro("__QDSP6_ARCH__", "4");
+    }
+  }
+  else if(CPU == "hexagonv5") {
+    Builder.defineMacro("__HEXAGON_V5__");
+    Builder.defineMacro("__HEXAGON_ARCH__", "5");
+    if(Opts.HexagonQdsp6Compat) {
+      Builder.defineMacro("__QDSP6_V5__");
+      Builder.defineMacro("__QDSP6_ARCH__", "5");
     }
   }
 }
@@ -3478,7 +3478,10 @@ namespace {
   static const unsigned TCEOpenCLAddrSpaceMap[] = {
       3, // opencl_global
       4, // opencl_local
-      5  // opencl_constant
+      5, // opencl_constant
+      0, // cuda_device
+      0, // cuda_constant
+      0  // cuda_shared
   };
 
   class TCETargetInfo : public TargetInfo{
@@ -3552,8 +3555,11 @@ protected:
   std::string ABI;
 
 public:
-  MipsTargetInfoBase(const std::string& triple, const std::string& ABIStr)
+  MipsTargetInfoBase(const std::string& triple,
+                     const std::string& ABIStr,
+                     const std::string& CPUStr)
     : TargetInfo(triple),
+      CPU(CPUStr),
       SoftFloat(false), SingleFloat(false),
       ABI(ABIStr)
   {}
@@ -3646,7 +3652,10 @@ public:
   virtual bool setFeatureEnabled(llvm::StringMap<bool> &Features,
                                  StringRef Name,
                                  bool Enabled) const {
-    if (Name == "soft-float" || Name == "single-float") {
+    if (Name == "soft-float" || Name == "single-float" ||
+        Name == "o32" || Name == "n32" || Name == "n64" || Name == "eabi" ||
+        Name == "mips32" || Name == "mips32r2" ||
+        Name == "mips64" || Name == "mips64r2") {
       Features[Name] = Enabled;
       return true;
     }
@@ -3678,7 +3687,7 @@ public:
 class Mips32TargetInfoBase : public MipsTargetInfoBase {
 public:
   Mips32TargetInfoBase(const std::string& triple) :
-    MipsTargetInfoBase(triple, "o32") {
+    MipsTargetInfoBase(triple, "o32", "mips32") {
     SizeType = UnsignedInt;
     PtrDiffType = SignedInt;
   }
@@ -3782,7 +3791,7 @@ class Mips64TargetInfoBase : public MipsTargetInfoBase {
   virtual void SetDescriptionString(const std::string &Name) = 0;
 public:
   Mips64TargetInfoBase(const std::string& triple) :
-    MipsTargetInfoBase(triple, "n64") {
+    MipsTargetInfoBase(triple, "n64", "mips64") {
     LongWidth = LongAlign = 64;
     PointerWidth = PointerAlign = 64;
     LongDoubleWidth = LongDoubleAlign = 128;
@@ -4128,10 +4137,10 @@ static TargetInfo *AllocateTarget(const std::string &T) {
       return new PPC64TargetInfo(T);
     }
 
-  case llvm::Triple::ptx32:
-    return new PTX32TargetInfo(T);
-  case llvm::Triple::ptx64:
-    return new PTX64TargetInfo(T);
+  case llvm::Triple::nvptx:
+    return new NVPTX32TargetInfo(T);
+  case llvm::Triple::nvptx64:
+    return new NVPTX64TargetInfo(T);
 
   case llvm::Triple::mblaze:
     return new MBlazeTargetInfo(T);

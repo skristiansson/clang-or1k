@@ -31,10 +31,11 @@ IdentifierInfo *Parser::getSEHExceptKeyword() {
   return Ident__except;
 }
 
-Parser::Parser(Preprocessor &pp, Sema &actions)
+Parser::Parser(Preprocessor &pp, Sema &actions, bool SkipFunctionBodies)
   : PP(pp), Actions(actions), Diags(PP.getDiagnostics()),
     GreaterThanIsOperator(true), ColonIsSacred(false), 
-    InMessageExpression(false), TemplateParameterDepth(0) {
+    InMessageExpression(false), TemplateParameterDepth(0),
+    SkipFunctionBodies(SkipFunctionBodies) {
   Tok.setKind(tok::eof);
   Actions.CurScope = 0;
   NumCachedScopes = 0;
@@ -184,7 +185,7 @@ bool Parser::ExpectAndConsume(tok::TokenKind ExpectedTok, unsigned DiagID,
 
 bool Parser::ExpectAndConsumeSemi(unsigned DiagID) {
   if (Tok.is(tok::semi) || Tok.is(tok::code_completion)) {
-    ConsumeAnyToken();
+    ConsumeToken();
     return false;
   }
   
@@ -201,6 +202,33 @@ bool Parser::ExpectAndConsumeSemi(unsigned DiagID) {
   return ExpectAndConsume(tok::semi, DiagID);
 }
 
+void Parser::ConsumeExtraSemi(ExtraSemiKind Kind, const char* DiagMsg) {
+  if (!Tok.is(tok::semi)) return;
+
+  // AfterDefinition should only warn when placed on the same line as the
+  // definition.  Otherwise, defer to another semi warning.
+  if (Kind == AfterDefinition && Tok.isAtStartOfLine()) return;
+
+  SourceLocation StartLoc = Tok.getLocation();
+  SourceLocation EndLoc = Tok.getLocation();
+  ConsumeToken();
+
+  while ((Tok.is(tok::semi) && !Tok.isAtStartOfLine())) {
+    EndLoc = Tok.getLocation();
+    ConsumeToken();
+  }
+
+  if (Kind == OutsideFunction && getLangOpts().CPlusPlus0x) {
+    Diag(StartLoc, diag::warn_cxx98_compat_top_level_semi)
+        << FixItHint::CreateRemoval(SourceRange(StartLoc, EndLoc));
+    return;
+  }
+
+  Diag(StartLoc, diag::ext_extra_semi)
+      << Kind << DiagMsg << FixItHint::CreateRemoval(SourceRange(StartLoc,
+                                                                 EndLoc));
+}
+
 //===----------------------------------------------------------------------===//
 // Error recovery.
 //===----------------------------------------------------------------------===//
@@ -213,15 +241,14 @@ bool Parser::ExpectAndConsumeSemi(unsigned DiagID) {
 ///
 /// If SkipUntil finds the specified token, it returns true, otherwise it
 /// returns false.
-bool Parser::SkipUntil(const tok::TokenKind *Toks, unsigned NumToks,
-                       bool StopAtSemi, bool DontConsume,
-                       bool StopAtCodeCompletion) {
+bool Parser::SkipUntil(ArrayRef<tok::TokenKind> Toks, bool StopAtSemi,
+                       bool DontConsume, bool StopAtCodeCompletion) {
   // We always want this function to skip at least one token if the first token
   // isn't T and if not at EOF.
   bool isFirstTokenSkipped = true;
   while (1) {
     // If we found one of the tokens, stop and return true.
-    for (unsigned i = 0; i != NumToks; ++i) {
+    for (unsigned i = 0, NumToks = Toks.size(); i != NumToks; ++i) {
       if (Tok.is(Toks[i])) {
         if (DontConsume) {
           // Noop, don't consume the token.
@@ -397,6 +424,8 @@ Parser::~Parser() {
   PP.RemovePragmaHandler("STDC", FPContractHandler.get());
   FPContractHandler.reset();
   PP.clearCodeCompletionHandler();
+
+  assert(TemplateIds.empty() && "Still alive TemplateIdAnnotations around?");
 }
 
 /// Initialize - Warm up the parser.
@@ -470,10 +499,30 @@ void Parser::Initialize() {
   }
 }
 
+namespace {
+  /// \brief RAIIObject to destroy the contents of a SmallVector of
+  /// TemplateIdAnnotation pointers and clear the vector.
+  class DestroyTemplateIdAnnotationsRAIIObj {
+    SmallVectorImpl<TemplateIdAnnotation *> &Container;
+  public:
+    DestroyTemplateIdAnnotationsRAIIObj(SmallVectorImpl<TemplateIdAnnotation *>
+                                       &Container)
+      : Container(Container) {}
+
+    ~DestroyTemplateIdAnnotationsRAIIObj() {
+      for (SmallVectorImpl<TemplateIdAnnotation *>::iterator I =
+           Container.begin(), E = Container.end();
+           I != E; ++I)
+        (*I)->Destroy();
+      Container.clear();
+    }
+  };
+}
+
 /// ParseTopLevelDecl - Parse one top-level declaration, return whatever the
 /// action tells us to.  This returns true if the EOF was encountered.
 bool Parser::ParseTopLevelDecl(DeclGroupPtrTy &Result) {
-  DelayedCleanupPoint CleanupRAII(TopLevelDeclCleanupPool);
+  DestroyTemplateIdAnnotationsRAIIObj CleanupRAII(TemplateIds);
 
   // Skip over the EOF token, flagging end of previous input for incremental 
   // processing
@@ -543,7 +592,7 @@ void Parser::ParseTranslationUnit() {
 Parser::DeclGroupPtrTy
 Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
                                  ParsingDeclSpec *DS) {
-  DelayedCleanupPoint CleanupRAII(TopLevelDeclCleanupPool);
+  DestroyTemplateIdAnnotationsRAIIObj CleanupRAII(TemplateIds);
   ParenBraceBracketBalancer BalancerRAIIObj(*this);
 
   if (PP.isCodeCompletionReached()) {
@@ -560,11 +609,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
     HandlePragmaPack();
     return DeclGroupPtrTy();
   case tok::semi:
-    Diag(Tok, getLangOpts().CPlusPlus0x ?
-         diag::warn_cxx98_compat_top_level_semi : diag::ext_top_level_semi)
-      << FixItHint::CreateRemoval(Tok.getLocation());
-
-    ConsumeToken();
+    ConsumeExtraSemi(OutsideFunction);
     // TODO: Invoke action for top-level semicolon.
     return DeclGroupPtrTy();
   case tok::r_brace:
@@ -619,7 +664,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
   case tok::kw_export:    // As in 'export template'
   case tok::kw_static_assert:
   case tok::kw__Static_assert:
-    // A function definition cannot start with a these keywords.
+    // A function definition cannot start with any of these keywords.
     {
       SourceLocation DeclEnd;
       StmtVector Stmts(Actions);
@@ -1108,10 +1153,7 @@ void Parser::ParseKNRParamDeclarations(Declarator &D) {
       ParseDeclarator(ParmDeclarator);
     }
 
-    if (Tok.is(tok::semi)) {
-      ConsumeToken();
-    } else {
-      Diag(Tok, diag::err_expected_semi_declaration);
+    if (ExpectAndConsumeSemi(diag::err_expected_semi_declaration)) {
       // Skip to end of block or statement
       SkipUntil(tok::semi, true);
       if (Tok.is(tok::semi))
@@ -1201,8 +1243,6 @@ TemplateIdAnnotation *Parser::takeTemplateIdAnnotation(const Token &tok) {
   assert(tok.is(tok::annot_template_id) && "Expected template-id token");
   TemplateIdAnnotation *
       Id = static_cast<TemplateIdAnnotation *>(tok.getAnnotationValue());
-  TopLevelDeclCleanupPool.delayMemberFunc< TemplateIdAnnotation,
-                                          &TemplateIdAnnotation::Destroy>(Id);
   return Id;
 }
 
@@ -1231,7 +1271,8 @@ TemplateIdAnnotation *Parser::takeTemplateIdAnnotation(const Token &tok) {
 bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
   assert((Tok.is(tok::identifier) || Tok.is(tok::coloncolon)
           || Tok.is(tok::kw_typename) || Tok.is(tok::annot_cxxscope)
-          || Tok.is(tok::kw_decltype)) && "Cannot be a type or scope token!");
+          || Tok.is(tok::kw_decltype) || Tok.is(tok::annot_template_id))
+          && "Cannot be a type or scope token!");
 
   if (Tok.is(tok::kw_typename)) {
     // Parse a C++ typename-specifier, e.g., "typename T::type".
@@ -1247,10 +1288,21 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
                                        0, /*IsTypename*/true))
       return true;
     if (!SS.isSet()) {
-      if (getLangOpts().MicrosoftExt)
-        Diag(Tok.getLocation(), diag::warn_expected_qualified_after_typename);
-      else
-        Diag(Tok.getLocation(), diag::err_expected_qualified_after_typename);
+      if (Tok.is(tok::identifier) || Tok.is(tok::annot_template_id)) {
+        // Attempt to recover by skipping the invalid 'typename'
+        if (!TryAnnotateTypeOrScopeToken(EnteringContext, NeedType) &&
+            Tok.isAnnotation()) {
+          unsigned DiagID = diag::err_expected_qualified_after_typename;
+          // MS compatibility: MSVC permits using known types with typename.
+          // e.g. "typedef typename T* pointer_type"
+          if (getLangOpts().MicrosoftExt)
+            DiagID = diag::warn_expected_qualified_after_typename;
+          Diag(Tok.getLocation(), DiagID);
+          return false;
+        }
+      }
+
+      Diag(Tok.getLocation(), diag::err_expected_qualified_after_typename);
       return true;
     }
 
@@ -1403,8 +1455,7 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
 
 /// TryAnnotateScopeToken - Like TryAnnotateTypeOrScopeToken but only
 /// annotates C++ scope specifiers and template-ids.  This returns
-/// true if the token was annotated or there was an error that could not be
-/// recovered from.
+/// true if there was an error that could not be recovered from.
 ///
 /// Note that this routine emits an error if you call it with ::new or ::delete
 /// as the current tokens, so only call it in contexts where these are invalid.

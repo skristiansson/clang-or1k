@@ -473,17 +473,14 @@ template <> struct DenseMapInfo<ObjCSummaryKey> {
   }
 
   static unsigned getHashValue(const ObjCSummaryKey &V) {
-    return (DenseMapInfo<IdentifierInfo*>::getHashValue(V.getIdentifier())
-            & 0x88888888)
-        | (DenseMapInfo<Selector>::getHashValue(V.getSelector())
-            & 0x55555555);
+    typedef std::pair<IdentifierInfo*, Selector> PairTy;
+    return DenseMapInfo<PairTy>::getHashValue(PairTy(V.getIdentifier(),
+                                                     V.getSelector()));
   }
 
   static bool isEqual(const ObjCSummaryKey& LHS, const ObjCSummaryKey& RHS) {
-    return DenseMapInfo<IdentifierInfo*>::isEqual(LHS.getIdentifier(),
-                                                  RHS.getIdentifier()) &&
-           DenseMapInfo<Selector>::isEqual(LHS.getSelector(),
-                                           RHS.getSelector());
+    return LHS.getIdentifier() == RHS.getIdentifier() &&
+           LHS.getSelector() == RHS.getSelector();
   }
 
 };
@@ -648,6 +645,10 @@ public:
     return getPersistentSummary(Summ);
   }
 
+  const RetainSummary *getDoNothingSummary() {
+    return getPersistentSummary(RetEffect::MakeNoRet(), DoNothing, DoNothing);
+  }
+  
   const RetainSummary *getDefaultSummary() {
     return getPersistentSummary(RetEffect::MakeNoRet(),
                                 DoNothing, MayEscape);
@@ -739,7 +740,8 @@ public:
     InitializeMethodSummaries();
   }
 
-  const RetainSummary *getSummary(const FunctionDecl *FD);
+  const RetainSummary *getSummary(const FunctionDecl *FD,
+                                  const CallOrObjCMessage *CME = 0);
 
   const RetainSummary *getMethodSummary(Selector S, IdentifierInfo *ClsName,
                                         const ObjCInterfaceDecl *ID,
@@ -886,7 +888,9 @@ static bool isMakeCollectable(const FunctionDecl *FD, StringRef FName) {
   return FName.find("MakeCollectable") != StringRef::npos;
 }
 
-const RetainSummary * RetainSummaryManager::getSummary(const FunctionDecl *FD) {
+const RetainSummary *
+RetainSummaryManager::getSummary(const FunctionDecl *FD,
+                                 const CallOrObjCMessage *CME) {
   // Look up a summary in our cache of FunctionDecls -> Summaries.
   FuncSummariesTy::iterator I = FuncSummaries.find(FD);
   if (I != FuncSummaries.end())
@@ -929,9 +933,9 @@ const RetainSummary * RetainSummaryManager::getSummary(const FunctionDecl *FD) {
     //  filters.
     assert(ScratchArgs.isEmpty());
 
-    if (FName == "pthread_create") {
-      // Part of: <rdar://problem/7299394>.  This will be addressed
-      // better with IPA.
+    if (FName == "pthread_create" || FName == "pthread_setspecific") {
+      // Part of: <rdar://problem/7299394> and <rdar://problem/11282706>.
+      // This will be addressed better with IPA.
       S = getPersistentStopSummary();
     } else if (FName == "NSMakeCollectable") {
       // Handle: id NSMakeCollectable(CFTypeRef)
@@ -941,6 +945,7 @@ const RetainSummary * RetainSummaryManager::getSummary(const FunctionDecl *FD) {
     } else if (FName == "IOBSDNameMatching" ||
                FName == "IOServiceMatching" ||
                FName == "IOServiceNameMatching" ||
+               FName == "IORegistryEntrySearchCFProperty" ||
                FName == "IORegistryEntryIDMatching" ||
                FName == "IOOpenFirmwarePathMatching") {
       // Part of <rdar://problem/6961230>. (IOKit)
@@ -993,6 +998,8 @@ const RetainSummary * RetainSummaryManager::getSummary(const FunctionDecl *FD) {
       // libdispatch finalizers.
       ScratchArgs = AF.add(ScratchArgs, 1, StopTracking);
       S = getPersistentSummary(RetEffect::MakeNoRet(), DoNothing, DoNothing);
+    } else if (FName.startswith("NSLog")) {
+      S = getDoNothingSummary();
     } else if (FName.startswith("NS") &&
                 (FName.find("Insert") != StringRef::npos)) {
       // Whitelist NSXXInsertXX, for example NSMapInsertIfAbsent, since they can
@@ -1000,6 +1007,9 @@ const RetainSummary * RetainSummaryManager::getSummary(const FunctionDecl *FD) {
       ScratchArgs = AF.add(ScratchArgs, 1, StopTracking);
       ScratchArgs = AF.add(ScratchArgs, 2, StopTracking);
       S = getPersistentSummary(RetEffect::MakeNoRet(), DoNothing, DoNothing);
+    } else if (CME && CME->hasNonZeroCallbackArg()) {
+      // Allow objects to escape through callbacks. radar://10973977
+      S = getPersistentStopSummary();
     }
 
     // Did we get a summary?
@@ -1854,6 +1864,15 @@ static inline bool contains(const SmallVectorImpl<ArgEffect>& V,
   return false;
 }
 
+static bool isNumericLiteralExpression(const Expr *E) {
+  // FIXME: This set of cases was copied from SemaExprObjC.
+  return isa<IntegerLiteral>(E) || 
+         isa<CharacterLiteral>(E) ||
+         isa<FloatingLiteral>(E) ||
+         isa<ObjCBoolLiteralExpr>(E) ||
+         isa<CXXBoolLiteralExpr>(E);
+}
+
 static bool isPropertyAccess(const Stmt *S, ParentMap &PM) {
   unsigned maxDepth = 4;
   while (S && maxDepth) {
@@ -1902,6 +1921,24 @@ PathDiagnosticPiece *CFRefReportVisitor::VisitNode(const ExplodedNode *N,
     }
     else if (isa<ObjCDictionaryLiteral>(S)) {
       os << "NSDictionary literal is an object with a +0 retain count";
+    }
+    else if (const ObjCBoxedExpr *BL = dyn_cast<ObjCBoxedExpr>(S)) {
+      if (isNumericLiteralExpression(BL->getSubExpr()))
+        os << "NSNumber literal is an object with a +0 retain count";
+      else {
+        const ObjCInterfaceDecl *BoxClass = 0;
+        if (const ObjCMethodDecl *Method = BL->getBoxingMethod())
+          BoxClass = Method->getClassInterface();
+
+        // We should always be able to find the boxing class interface,
+        // but consider this future-proofing.
+        if (BoxClass)
+          os << *BoxClass << " b";
+        else
+          os << "B";
+
+        os << "oxed expression produces an object with a +0 retain count";
+      }
     }
     else {      
       if (const CallExpr *CE = dyn_cast<CallExpr>(S)) {
@@ -2311,6 +2348,7 @@ class RetainCountChecker
                     check::PostStmt<CXXConstructExpr>,
                     check::PostStmt<ObjCArrayLiteral>,
                     check::PostStmt<ObjCDictionaryLiteral>,
+                    check::PostStmt<ObjCBoxedExpr>,
                     check::PostObjCMessage,
                     check::PreStmt<ReturnStmt>,
                     check::RegionChanges,
@@ -2457,6 +2495,8 @@ public:
   void checkPostStmt(const CXXConstructExpr *CE, CheckerContext &C) const;
   void checkPostStmt(const ObjCArrayLiteral *AL, CheckerContext &C) const;
   void checkPostStmt(const ObjCDictionaryLiteral *DL, CheckerContext &C) const;
+  void checkPostStmt(const ObjCBoxedExpr *BE, CheckerContext &C) const;
+
   void checkPostObjCMessage(const ObjCMessage &Msg, CheckerContext &C) const;
                       
   void checkSummary(const RetainSummary &Summ, const CallOrObjCMessage &Call,
@@ -2632,10 +2672,13 @@ void RetainCountChecker::checkPostStmt(const CallExpr *CE,
   if (dyn_cast_or_null<BlockDataRegion>(L.getAsRegion())) {
     Summ = Summaries.getPersistentStopSummary();
   } else if (const FunctionDecl *FD = L.getAsFunctionDecl()) {
-    Summ = Summaries.getSummary(FD);
+    CallOrObjCMessage CME(CE, state, C.getLocationContext());
+    Summ = Summaries.getSummary(FD, &CME);
   } else if (const CXXMemberCallExpr *me = dyn_cast<CXXMemberCallExpr>(CE)) {
-    if (const CXXMethodDecl *MD = me->getMethodDecl())
-      Summ = Summaries.getSummary(MD);
+    if (const CXXMethodDecl *MD = me->getMethodDecl()) {
+      CallOrObjCMessage CME(CE, state, C.getLocationContext());
+      Summ = Summaries.getSummary(MD, &CME);
+    }
   }
 
   if (!Summ)
@@ -2651,13 +2694,14 @@ void RetainCountChecker::checkPostStmt(const CXXConstructExpr *CE,
     return;
 
   RetainSummaryManager &Summaries = getSummaryManager(C);
-  const RetainSummary *Summ = Summaries.getSummary(Ctor);
+  ProgramStateRef state = C.getState();
+  CallOrObjCMessage CME(CE, state, C.getLocationContext());
+  const RetainSummary *Summ = Summaries.getSummary(Ctor, &CME);
 
   // If we didn't get a summary, this constructor doesn't affect retain counts.
   if (!Summ)
     return;
 
-  ProgramStateRef state = C.getState();
   checkSummary(*Summ, CallOrObjCMessage(CE, state, C.getLocationContext()), C);
 }
 
@@ -2702,6 +2746,21 @@ void RetainCountChecker::checkPostStmt(const ObjCDictionaryLiteral *DL,
                                        CheckerContext &C) const {
   // Apply the 'MayEscape' to all keys and values.
   processObjCLiterals(C, DL);
+}
+
+void RetainCountChecker::checkPostStmt(const ObjCBoxedExpr *Ex,
+                                       CheckerContext &C) const {
+  const ExplodedNode *Pred = C.getPredecessor();  
+  const LocationContext *LCtx = Pred->getLocationContext();
+  ProgramStateRef State = Pred->getState();
+
+  if (SymbolRef Sym = State->getSVal(Ex, LCtx).getAsSymbol()) {
+    QualType ResultTy = Ex->getType();
+    State = State->set<RefBindings>(Sym, RefVal::makeNotOwned(RetEffect::ObjC,
+                                                              ResultTy));
+  }
+
+  C.addTransition(State);
 }
 
 void RetainCountChecker::checkPostObjCMessage(const ObjCMessage &Msg, 
@@ -3249,7 +3308,7 @@ void RetainCountChecker::checkPreStmt(const ReturnStmt *S,
 
   if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(CD)) {
     if (!isa<CXXMethodDecl>(FD))
-      if (const RetainSummary *Summ = Summaries.getSummary(FD))
+      if (const RetainSummary *Summ = Summaries.getSummary(FD, 0))
         checkReturnWithRetEffect(S, C, Pred, Summ->getRetEffect(), X,
                                  Sym, state);
   }
@@ -3346,7 +3405,11 @@ void RetainCountChecker::checkBind(SVal loc, SVal val, const Stmt *S,
       // To test (3), generate a new state with the binding added.  If it is
       // the same state, then it escapes (since the store cannot represent
       // the binding).
-      escapes = (state == (state->bindLoc(*regionLoc, val)));
+      // Do this only if we know that the store is not supposed to generate the
+      // same state.
+      SVal StoredVal = state->getSVal(regionLoc->getRegion());
+      if (StoredVal != val)
+        escapes = (state == (state->bindLoc(*regionLoc, val)));
     }
     if (!escapes) {
       // Case 4: We do not currently model what happens when a symbol is

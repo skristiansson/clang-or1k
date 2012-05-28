@@ -894,6 +894,7 @@ ParsedType Parser::ParseObjCTypeName(ObjCDeclSpec &DS,
     DeclSpec declSpec(AttrFactory);
     declSpec.setObjCQualifiers(&DS);
     ParseSpecifierQualifierList(declSpec);
+    declSpec.SetRangeEnd(Tok.getLocation().getLocWithOffset(-1));
     Declarator declarator(declSpec, context);
     ParseDeclarator(declarator);
 
@@ -965,7 +966,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
                                   tok::TokenKind mType,
                                   tok::ObjCKeywordKind MethodImplKind,
                                   bool MethodDefinition) {
-  ParsingDeclRAIIObject PD(*this);
+  ParsingDeclRAIIObject PD(*this, ParsingDeclRAIIObject::NoParent);
 
   if (Tok.is(tok::code_completion)) {
     Actions.CodeCompleteObjCMethodDecl(getCurScope(), mType == tok::minus, 
@@ -1258,9 +1259,7 @@ void Parser::ParseObjCClassInstanceVariables(Decl *interfaceDecl,
 
     // Check for extraneous top-level semicolon.
     if (Tok.is(tok::semi)) {
-      Diag(Tok, diag::ext_extra_ivar_semi)
-        << FixItHint::CreateRemoval(Tok.getLocation());
-      ConsumeToken();
+      ConsumeExtraSemi(InstanceVariableList);
       continue;
     }
 
@@ -2066,6 +2065,10 @@ ExprResult Parser::ParseObjCAtExpression(SourceLocation AtLoc) {
     // Objective-C dictionary literal
     return ParsePostfixExpressionSuffix(ParseObjCDictionaryLiteral(AtLoc));
           
+  case tok::l_paren:
+    // Objective-C boxed expression
+    return ParsePostfixExpressionSuffix(ParseObjCBoxedExpr(AtLoc));
+          
   default:
     if (Tok.getIdentifierInfo() == 0)
       return ExprError(Diag(AtLoc, diag::err_unexpected_at));
@@ -2449,10 +2452,14 @@ Parser::ParseObjCMessageExpressionBody(SourceLocation LBracLoc,
     }
     // Parse the, optional, argument list, comma separated.
     while (Tok.is(tok::comma)) {
-      ConsumeToken(); // Eat the ','.
+      SourceLocation commaLoc = ConsumeToken(); // Eat the ','.
       ///  Parse the expression after ','
       ExprResult Res(ParseAssignmentExpression());
       if (Res.isInvalid()) {
+        if (Tok.is(tok::colon)) {
+          Diag(commaLoc, diag::note_extra_comma_message_arg) <<
+            FixItHint::CreateRemoval(commaLoc);
+        }
         // We must manually skip to a ']', otherwise the expression skipper will
         // stop at the ']' when it skips to the ';'.  We want it to skip beyond
         // the enclosing expression.
@@ -2578,6 +2585,31 @@ ExprResult Parser::ParseObjCNumericLiteral(SourceLocation AtLoc) {
   }
   ConsumeToken(); // Consume the literal token.
   return Owned(Actions.BuildObjCNumericLiteral(AtLoc, Lit.take()));
+}
+
+/// ParseObjCBoxedExpr -
+/// objc-box-expression:
+///       @( assignment-expression )
+ExprResult
+Parser::ParseObjCBoxedExpr(SourceLocation AtLoc) {
+  if (Tok.isNot(tok::l_paren))
+    return ExprError(Diag(Tok, diag::err_expected_lparen_after) << "@");
+
+  BalancedDelimiterTracker T(*this, tok::l_paren);
+  T.consumeOpen();
+  ExprResult ValueExpr(ParseAssignmentExpression());
+  if (T.consumeClose())
+    return ExprError();
+
+  if (ValueExpr.isInvalid())
+    return ExprError();
+
+  // Wrap the sub-expression in a parenthesized expression, to distinguish
+  // a boxed expression from a literal.
+  SourceLocation LPLoc = T.getOpenLocation(), RPLoc = T.getCloseLocation();
+  ValueExpr = Actions.ActOnParenExpr(LPLoc, RPLoc, ValueExpr.take());
+  return Owned(Actions.BuildObjCBoxedExpr(SourceRange(AtLoc, RPLoc),
+                                          ValueExpr.take()));
 }
 
 ExprResult Parser::ParseObjCArrayLiteral(SourceLocation AtLoc) {
@@ -2713,12 +2745,13 @@ Parser::ParseObjCProtocolExpression(SourceLocation AtLoc) {
     return ExprError(Diag(Tok, diag::err_expected_ident));
 
   IdentifierInfo *protocolId = Tok.getIdentifierInfo();
-  ConsumeToken();
+  SourceLocation ProtoIdLoc = ConsumeToken();
 
   T.consumeClose();
 
   return Owned(Actions.ParseObjCProtocolExpression(protocolId, AtLoc, ProtoLoc,
                                                    T.getOpenLocation(),
+                                                   ProtoIdLoc,
                                                    T.getCloseLocation()));
 }
 
@@ -2811,11 +2844,9 @@ Decl *Parser::ParseLexedObjCMethodDefs(LexedMethod &LM) {
   // specified Declarator for the method.
   Actions.ActOnStartOfObjCMethodDef(getCurScope(), MDecl);
     
-  if (PP.isCodeCompletionEnabled()) {
-      if (trySkippingFunctionBodyForCodeCompletion()) {
-          BodyScope.Exit();
-          return Actions.ActOnFinishFunctionBody(MDecl, 0);
-      }
+  if (SkipFunctionBodies && trySkippingFunctionBody()) {
+    BodyScope.Exit();
+    return Actions.ActOnFinishFunctionBody(MDecl, 0);
   }
     
   StmtResult FnBody(ParseCompoundStatementBody());
