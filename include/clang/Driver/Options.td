@@ -38,6 +38,7 @@ def clang_i_Group         : OptionGroup<"<clang i group>">, Group<i_Group>;
 def m_Group               : OptionGroup<"<m group>">, Group<CompileOnly_Group>;
 def m_x86_Features_Group  : OptionGroup<"<m x86 features group>">, Group<m_Group>;
 def m_hexagon_Features_Group  : OptionGroup<"<m hexagon features group>">, Group<m_Group>;
+def m_or1k_Features_Group  : OptionGroup<"<m or1k features group>">, Group<m_Group>;
 def u_Group               : OptionGroup<"<u group>">;
 
 def pedantic_Group        : OptionGroup<"<pedantic group>">,
@@ -730,8 +731,11 @@ def m64 : Flag<"-m64">, Group<m_Group>, Flags<[DriverOption]>;
 def mabi_EQ : Joined<"-mabi=">, Group<m_Group>;
 def march_EQ : Joined<"-march=">, Group<m_Group>;
 def mcmodel_EQ : Joined<"-mcmodel=">, Group<m_Group>;
+def mcmov : Flag<"-mcmov">, Group<m_or1k_Features_Group>;
+def mcompat_delay : Flag<"-mcompat-delay">, Group<m_or1k_Features_Group>;
 def mconstant_cfstrings : Flag<"-mconstant-cfstrings">, Group<clang_ignored_m_Group>;
 def mcpu_EQ : Joined<"-mcpu=">, Group<m_Group>;
+def mdelay : Flag<"-mdelay">, Group<m_or1k_Features_Group>;
 def mdynamic_no_pic : Joined<"-mdynamic-no-pic">, Group<m_Group>;
 def mfix_and_continue : Flag<"-mfix-and-continue">, Group<clang_ignored_m_Group>;
 def mfloat_abi_EQ : Joined<"-mfloat-abi=">, Group<m_Group>;
@@ -739,6 +743,8 @@ def mfpmath_EQ : Joined<"-mfpmath=">, Group<m_Group>;
 def mfpu_EQ : Joined<"-mfpu=">, Group<m_Group>;
 def mglobal_merge : Flag<"-mglobal-merge">, Group<m_Group>;
 def mhard_float : Flag<"-mhard-float">, Group<m_Group>;
+def mhard_div : Flag<"-mhard-div">, Group<m_Group>;
+def mhard_mul : Flag<"-mhard-mul">, Group<m_Group>;
 def miphoneos_version_min_EQ : Joined<"-miphoneos-version-min=">, Group<m_Group>;
 def mios_version_min_EQ : Joined<"-mios-version-min=">, Alias<miphoneos_version_min_EQ>;
 def mios_simulator_version_min_EQ : Joined<"-mios-simulator-version-min=">, Group<m_Group>;
@@ -756,13 +762,16 @@ def mstack_alignment : Joined<"-mstack-alignment=">, Group<m_Group>, Flags<[CC1O
 def mmmx : Flag<"-mmmx">, Group<m_x86_Features_Group>;
 def mno_3dnowa : Flag<"-mno-3dnowa">, Group<m_x86_Features_Group>;
 def mno_3dnow : Flag<"-mno-3dnow">, Group<m_x86_Features_Group>;
+def mno_cmov : Flag<"-mno-cmov">, Group<m_or1k_Features_Group>;
 def mno_constant_cfstrings : Flag<"-mno-constant-cfstrings">, Group<m_Group>;
+def mno_delay : Flag<"-mno-delay">, Group<m_or1k_Features_Group>;
 def mno_global_merge : Flag<"-mno-global-merge">, Group<m_Group>, Flags<[CC1Option]>,
   HelpText<"Disable merging of globals">;
 def mno_mmx : Flag<"-mno-mmx">, Group<m_x86_Features_Group>;
 def mno_pascal_strings : Flag<"-mno-pascal-strings">, Group<m_Group>;
 def mno_red_zone : Flag<"-mno-red-zone">, Group<m_Group>;
 def mno_relax_all : Flag<"-mno-relax-all">, Group<m_Group>;
+def mno_ror : Flag<"-mno-ror">, Group<m_or1k_Features_Group>;
 def mno_rtd: Flag<"-mno-rtd">, Group<m_Group>;
 def mno_soft_float : Flag<"-mno-soft-float">, Group<m_Group>;
 def mno_stackrealign : Flag<"-mno-stackrealign">, Group<m_Group>;
@@ -795,11 +804,14 @@ def mred_zone : Flag<"-mred-zone">, Group<m_Group>;
 def mregparm_EQ : Joined<"-mregparm=">, Group<m_Group>;
 def mrelax_all : Flag<"-mrelax-all">, Group<m_Group>, Flags<[CC1Option]>,
   HelpText<"(integrated-as) Relax all machine instructions">;
+def mror : Flag<"-mror">, Group<m_or1k_Features_Group>;
 def mrtd : Flag<"-mrtd">, Group<m_Group>, Flags<[CC1Option]>,
   HelpText<"Make StdCall calling convention the default">;
 def msmall_data_threshold_EQ : Joined <"-msmall-data-threshold=">, Group<m_Group>;
 def msoft_float : Flag<"-msoft-float">, Group<m_Group>, Flags<[CC1Option]>,
   HelpText<"Use software floating point">;
+def msoft_div : Flag<"-msoft-div">, Group<m_Group>;
+def msoft_mul : Flag<"-msoft-mul">, Group<m_Group>;
 def mno_implicit_float : Flag<"-mno-implicit-float">, Group<m_Group>,
   HelpText<"Don't generate implicit floating point instructions">;
 def msse2 : Flag<"-msse2">, Group<m_x86_Features_Group>;

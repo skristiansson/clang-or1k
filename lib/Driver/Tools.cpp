@@ -895,6 +895,97 @@ void Clang::AddMIPSTargetArgs(const ArgList &Args,
   }
 }
 
+void Clang::AddOR1KTargetArgs(const ArgList &Args,
+                              ArgStringList &CmdArgs) const {
+  const Driver &D = getToolChain().getDriver();
+  // Select the float ABI as determined by -msoft-float, -mhard-float,
+  // and -mfloat-abi=.
+  StringRef FloatABI;
+  if (Arg *A = Args.getLastArg(options::OPT_msoft_float,
+                               options::OPT_mhard_float,
+                               options::OPT_mfloat_abi_EQ)) {
+    if (A->getOption().matches(options::OPT_msoft_float))
+      FloatABI = "soft";
+    else if (A->getOption().matches(options::OPT_mhard_float))
+      FloatABI = "hard";
+    else {
+      FloatABI = A->getValue(Args);
+      if (FloatABI != "soft" && FloatABI != "hard") {
+        D.Diag(diag::err_drv_invalid_mfloat_abi)
+          << A->getAsString(Args);
+        FloatABI = "soft";
+      }
+    }
+  }
+
+  if (FloatABI.empty()) {
+    FloatABI = "soft";
+  }
+
+  if (FloatABI == "hard") {
+    // Floating point operations and argument passing are hard.
+    assert(FloatABI == "hard" && "Invalid float abi!");
+    CmdArgs.push_back("-mfloat-abi");
+    CmdArgs.push_back("hard");
+
+    CmdArgs.push_back("-target-feature");
+    CmdArgs.push_back("+float");
+  } else {
+     // Floating point operations and argument passing are soft.
+     CmdArgs.push_back("-msoft-float");
+     CmdArgs.push_back("-mfloat-abi");
+     CmdArgs.push_back("soft");
+  }
+
+  if (Arg *A = Args.getLastArg(options::OPT_mhard_div,
+                               options::OPT_msoft_div)) {
+    CmdArgs.push_back("-target-feature");
+    if (A->getOption().matches(options::OPT_mhard_div))
+      CmdArgs.push_back("+div");
+    else
+      CmdArgs.push_back("-div");
+  }
+
+  if (Arg *A = Args.getLastArg(options::OPT_mhard_mul,
+                               options::OPT_msoft_mul)) {
+    CmdArgs.push_back("-target-feature");
+    if (A->getOption().matches(options::OPT_mhard_mul))
+      CmdArgs.push_back("+mul");
+    else
+      CmdArgs.push_back("-mul");
+  }
+
+  if (Arg *A = Args.getLastArg(options::OPT_mcmov,
+                               options::OPT_mno_cmov)) {
+    CmdArgs.push_back("-target-feature");
+    if (A->getOption().matches(options::OPT_mcmov))
+      CmdArgs.push_back("+cmov");
+    else
+      CmdArgs.push_back("-cmov");
+  }
+
+  if (Arg *A = Args.getLastArg(options::OPT_mror,
+                               options::OPT_mno_ror)) {
+    CmdArgs.push_back("-target-feature");
+    if (A->getOption().matches(options::OPT_mror))
+      CmdArgs.push_back("+ror");
+    else
+      CmdArgs.push_back("-ror");
+  }
+
+  if (Arg *A = Args.getLastArg(options::OPT_mdelay,
+                               options::OPT_mno_delay,
+                               options::OPT_mcompat_delay)) {
+    if (A->getOption().matches(options::OPT_mno_delay)) {
+      CmdArgs.push_back("-mllvm");
+      CmdArgs.push_back("-disable-or1k-delay-filler");
+    } else if (A->getOption().matches(options::OPT_mcompat_delay)) {
+      CmdArgs.push_back("-mllvm");
+      CmdArgs.push_back("-compat-or1k-delay-filler");
+    }
+  }
+}
+
 void Clang::AddSparcTargetArgs(const ArgList &Args,
                              ArgStringList &CmdArgs) const {
   const Driver &D = getToolChain().getDriver();
@@ -1791,6 +1882,10 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
 
   case llvm::Triple::hexagon:
     AddHexagonTargetArgs(Args, CmdArgs);
+    break;
+
+  case llvm::Triple::or1k:
+    AddOR1KTargetArgs(Args, CmdArgs);
     break;
   }
 
