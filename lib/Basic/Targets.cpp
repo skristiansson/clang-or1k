@@ -1205,6 +1205,7 @@ public:
   OR1KTargetInfo(const std::string& triple) : TargetInfo(triple) {
     DescriptionString = "E-p:32:32-i8:8:8-i16:16:16-i64:32:32-"
                         "f64:32:32-v64:32:32-v128:32:32-n32";
+    UserLabelPrefix = "";
   }
 
   virtual void getTargetBuiltins(const Builtin::Info *&Records,
