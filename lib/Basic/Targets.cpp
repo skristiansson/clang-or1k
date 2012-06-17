@@ -322,6 +322,8 @@ protected:
       Builder.defineMacro("_REENTRANT");
     if (Opts.CPlusPlus)
       Builder.defineMacro("_GNU_SOURCE");
+    if (Triple.getArch() == llvm::Triple::or1k)
+      Builder.defineMacro("__UCLIBC__");
   }
 public:
   LinuxTargetInfo(const std::string& triple)
@@ -4147,7 +4149,12 @@ static TargetInfo *AllocateTarget(const std::string &T) {
     return new MBlazeTargetInfo(T);
 
   case llvm::Triple::or1k:
-    return new OR1KTargetInfo(T);
+    switch (os) {
+    case llvm::Triple::Linux:
+      return new LinuxTargetInfo<OR1KTargetInfo>(T);
+    default:
+      return new OR1KTargetInfo(T);
+    }
 
   case llvm::Triple::sparc:
     switch (os) {

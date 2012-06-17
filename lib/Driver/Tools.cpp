@@ -4837,6 +4837,74 @@ void openbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
   C.addCommand(new Command(JA, *this, Exec, CmdArgs));
 }
 
+void or1klinux::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
+                                       const InputInfo &Output,
+                                       const InputInfoList &Inputs,
+                                       const ArgList &Args,
+                                       const char *LinkingOutput) const {
+  ArgStringList CmdArgs;
+
+  Args.AddAllArgValues(CmdArgs, options::OPT_Wa_COMMA,
+                       options::OPT_Xassembler);
+
+  CmdArgs.push_back("-o");
+  CmdArgs.push_back(Output.getFilename());
+
+  for (InputInfoList::const_iterator
+         it = Inputs.begin(), ie = Inputs.end(); it != ie; ++it) {
+    const InputInfo &II = *it;
+    CmdArgs.push_back(II.getFilename());
+  }
+
+  const char *Exec =
+    Args.MakeArgString(getToolChain().GetProgramPath("as"));
+  C.addCommand(new Command(JA, *this, Exec, CmdArgs));
+}
+
+void or1klinux::Link::ConstructJob(Compilation &C, const JobAction &JA,
+                                   const InputInfo &Output,
+                                   const InputInfoList &Inputs,
+                                   const ArgList &Args,
+                                   const char *LinkingOutput) const {
+  const Driver &D = getToolChain().getDriver();
+  ArgStringList CmdArgs;
+
+  if (Output.isFilename()) {
+    CmdArgs.push_back("-o");
+    CmdArgs.push_back(Output.getFilename());
+  } else {
+    assert(Output.isNothing() && "Invalid output.");
+  }
+
+  if (!D.SysRoot.empty())
+    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
+
+  if (!Args.hasArg(options::OPT_nostdlib)) {
+    CmdArgs.push_back(Args.MakeArgString(getToolChain().GetFilePath("crt0.o")));
+    CmdArgs.push_back(Args.MakeArgString(getToolChain().GetFilePath("crti.o")));
+    CmdArgs.push_back(Args.MakeArgString(getToolChain().
+                                         GetFilePath("crtbegin.o")));
+    CmdArgs.push_back(Args.MakeArgString(getToolChain().
+                                         GetFilePath("crtend.o")));
+    CmdArgs.push_back(Args.MakeArgString(getToolChain().GetFilePath("crtn.o")));
+  }
+  AddLinkerInputs(getToolChain(), Inputs, Args, CmdArgs);
+
+  const ToolChain::path_list Paths = getToolChain().getFilePaths();
+  for (ToolChain::path_list::const_iterator i = Paths.begin(), e = Paths.end();
+       i != e; ++i)
+    CmdArgs.push_back(Args.MakeArgString(StringRef("-L") + *i));
+
+  if (!Args.hasArg(options::OPT_nolibc)) {
+    CmdArgs.push_back("-lc");
+  }
+  CmdArgs.push_back("-lcompiler_rt");
+
+  const char *Exec =
+    Args.MakeArgString(getToolChain().GetProgramPath("ld"));
+  C.addCommand(new Command(JA, *this, Exec, CmdArgs));
+}
+
 void freebsd::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
                                      const InputInfo &Output,
                                      const InputInfoList &Inputs,

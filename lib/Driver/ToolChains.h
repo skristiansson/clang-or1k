@@ -471,6 +471,17 @@ public:
                            const ActionList &Inputs) const;
 };
 
+class LLVM_LIBRARY_VISIBILITY OR1KLinux : public Generic_ELF {
+public:
+  OR1KLinux(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
+
+  virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
+                           const ActionList &Inputs) const;
+
+  virtual void AddClangSystemIncludeArgs(const ArgList &DriverArgs,
+                                         ArgStringList &CC1Args) const;
+};
+
 class LLVM_LIBRARY_VISIBILITY FreeBSD : public Generic_ELF {
 public:
   FreeBSD(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);

@@ -1745,6 +1745,8 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
     case llvm::Triple::Linux:
       if (Target.getArch() == llvm::Triple::hexagon)
         TC = new toolchains::Hexagon_TC(*this, Target);
+      else if (Target.getArch() == llvm::Triple::or1k)
+        TC = new toolchains::OR1KLinux(*this, Target, Args);
       else
         TC = new toolchains::Linux(*this, Target, Args);
       break;
