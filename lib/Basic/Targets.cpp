@@ -1269,9 +1269,8 @@ public:
 void OR1KTargetInfo::getTargetDefines(const LangOptions &Opts,
                                       MacroBuilder &Builder) const {
   // Target identification.
-  Builder.defineMacro("__openrisc__");
-  Builder.defineMacro("_ARCH_OPENRISC_");
-  Builder.defineMacro("__OPENRISC__");
+  Builder.defineMacro("__or1k__");
+  Builder.defineMacro("__OR1K__");
 
   // Target properties.
   Builder.defineMacro("_BIG_ENDIAN_");
