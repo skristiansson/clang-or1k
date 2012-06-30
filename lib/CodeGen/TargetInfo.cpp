@@ -3139,7 +3139,7 @@ public:
 class OR1KTargetCodeGenInfo : public TargetCodeGenInfo {
 public:
   OR1KTargetCodeGenInfo(CodeGenTypes &CGT)
-    : TargetCodeGenInfo(new MBlazeABIInfo(CGT)) {}
+    : TargetCodeGenInfo(new OR1KABIInfo(CGT)) {}
   void SetTargetAttributes(const Decl *D, llvm::GlobalValue *GV,
                            CodeGen::CodeGenModule &M) const;
 };
