@@ -322,6 +322,15 @@ static bool canExpandIndirectArgument(QualType Ty, ASTContext &Context) {
   return true;
 }
 
+/// getFirstFieldInTransparentUnion - In case Ty is a transparent union
+/// return the type of the first field in the union, otherwise return Ty.
+static QualType getFirstFieldInTransparentUnion(QualType Ty) {
+  const RecordType *UT = Ty->getAsUnionType();
+  if (UT && UT->getDecl()->hasAttr<TransparentUnionAttr>())
+    return UT->getDecl()->field_begin()->getType();
+  return Ty;
+}
+
 namespace {
 /// DefaultABIInfo - The default implementation for ABI specific
 /// details. This implementation provides information which results in
@@ -357,6 +366,7 @@ llvm::Value *DefaultABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
 }
 
 ABIArgInfo DefaultABIInfo::classifyArgumentType(QualType Ty) const {
+  Ty = getFirstFieldInTransparentUnion(Ty);
   if (isAggregateTypeForABI(Ty)) {
     // Records with non trivial destructors/constructors should not be passed
     // by value.
@@ -693,6 +703,7 @@ ABIArgInfo X86_32ABIInfo::getIndirectResult(QualType Ty, bool ByVal) const {
 }
 
 ABIArgInfo X86_32ABIInfo::classifyArgumentType(QualType Ty) const {
+  Ty = getFirstFieldInTransparentUnion(Ty);
   // FIXME: Set alignment on indirect arguments.
   if (isAggregateTypeForABI(Ty)) {
     // Structures with flexible arrays are always indirect.
@@ -1923,6 +1934,7 @@ ABIArgInfo X86_64ABIInfo::classifyArgumentType(
   const
 {
   X86_64ABIInfo::Class Lo, Hi;
+  Ty = getFirstFieldInTransparentUnion(Ty);
   classify(Ty, 0, Lo, Hi);
 
   // Check some invariants.
@@ -2137,6 +2149,7 @@ llvm::Value *X86_64ABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
   // };
   unsigned neededInt, neededSSE;
 
+  Ty = getFirstFieldInTransparentUnion(Ty);
   Ty = CGF.getContext().getCanonicalType(Ty);
   ABIArgInfo AI = classifyArgumentType(Ty, 0, neededInt, neededSSE);
 
@@ -2646,6 +2659,7 @@ static bool isHomogeneousAggregate(QualType Ty, const Type *&Base,
 }
 
 ABIArgInfo ARMABIInfo::classifyArgumentType(QualType Ty) const {
+  Ty = getFirstFieldInTransparentUnion(Ty);
   if (!isAggregateTypeForABI(Ty)) {
     // Treat an enum type as its underlying type.
     if (const EnumType *EnumTy = Ty->getAs<EnumType>())
@@ -2926,6 +2940,7 @@ ABIArgInfo NVPTXABIInfo::classifyReturnType(QualType RetTy) const {
 }
 
 ABIArgInfo NVPTXABIInfo::classifyArgumentType(QualType Ty) const {
+  Ty = getFirstFieldInTransparentUnion(Ty);
   if (isAggregateTypeForABI(Ty))
     return ABIArgInfo::getIndirect(0);
 
@@ -3072,6 +3087,7 @@ ABIArgInfo MBlazeABIInfo::classifyReturnType(QualType RetTy) const {
 }
 
 ABIArgInfo MBlazeABIInfo::classifyArgumentType(QualType Ty) const {
+  Ty = getFirstFieldInTransparentUnion(Ty);
   if (isAggregateTypeForABI(Ty))
     return ABIArgInfo::getIndirect(0);
 
@@ -3182,6 +3198,7 @@ ABIArgInfo OR1KABIInfo::classifyReturnType(QualType RetTy) const {
 }
 
 ABIArgInfo OR1KABIInfo::classifyArgumentType(QualType Ty) const {
+  Ty = getFirstFieldInTransparentUnion(Ty);
   if (isAggregateTypeForABI(Ty))
     return ABIArgInfo::getIndirect(0);
 
@@ -3368,6 +3385,7 @@ llvm::Type *MipsABIInfo::getPaddingType(uint64_t Align, uint64_t Offset) const {
 
 ABIArgInfo
 MipsABIInfo::classifyArgumentType(QualType Ty, uint64_t &Offset) const {
+  Ty = getFirstFieldInTransparentUnion(Ty);
   uint64_t OrigOffset = Offset;
   uint64_t TySize = getContext().getTypeSize(Ty);
   uint64_t Align = getContext().getTypeAlign(Ty) / 8;
