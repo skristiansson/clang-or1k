@@ -27,6 +27,7 @@
 
 #include "Transforms.h"
 #include "Internals.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/Basic/SourceManager.h"
 
 using namespace clang;
@@ -37,7 +38,6 @@ namespace {
 
 class RootBlockObjCVarRewriter :
                           public RecursiveASTVisitor<RootBlockObjCVarRewriter> {
-  MigrationPass &Pass;
   llvm::DenseSet<VarDecl *> &VarsToChange;
 
   class BlockVarChecker : public RecursiveASTVisitor<BlockVarChecker> {
@@ -71,9 +71,8 @@ class RootBlockObjCVarRewriter :
   };
 
 public:
-  RootBlockObjCVarRewriter(MigrationPass &pass,
-                           llvm::DenseSet<VarDecl *> &VarsToChange)
-    : Pass(pass), VarsToChange(VarsToChange) { }
+  RootBlockObjCVarRewriter(llvm::DenseSet<VarDecl *> &VarsToChange)
+    : VarsToChange(VarsToChange) { }
 
   bool VisitBlockDecl(BlockDecl *block) {
     SmallVector<VarDecl *, 4> BlockVars;
@@ -111,16 +110,14 @@ private:
 };
 
 class BlockObjCVarRewriter : public RecursiveASTVisitor<BlockObjCVarRewriter> {
-  MigrationPass &Pass;
   llvm::DenseSet<VarDecl *> &VarsToChange;
 
 public:
-  BlockObjCVarRewriter(MigrationPass &pass,
-                       llvm::DenseSet<VarDecl *> &VarsToChange)
-    : Pass(pass), VarsToChange(VarsToChange) { }
+  BlockObjCVarRewriter(llvm::DenseSet<VarDecl *> &VarsToChange)
+    : VarsToChange(VarsToChange) { }
 
   bool TraverseBlockDecl(BlockDecl *block) {
-    RootBlockObjCVarRewriter(Pass, VarsToChange).TraverseDecl(block);
+    RootBlockObjCVarRewriter(VarsToChange).TraverseDecl(block);
     return true;
   }
 };
@@ -131,7 +128,7 @@ void BlockObjCVariableTraverser::traverseBody(BodyContext &BodyCtx) {
   MigrationPass &Pass = BodyCtx.getMigrationContext().Pass;
   llvm::DenseSet<VarDecl *> VarsToChange;
 
-  BlockObjCVarRewriter trans(Pass, VarsToChange);
+  BlockObjCVarRewriter trans(VarsToChange);
   trans.TraverseStmt(BodyCtx.getTopStmt());
 
   for (llvm::DenseSet<VarDecl *>::iterator

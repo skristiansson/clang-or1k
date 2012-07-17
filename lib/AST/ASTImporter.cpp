@@ -237,45 +237,6 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
 static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
                                      Decl *D1, Decl *D2);
 
-/// \brief Determine if two APInts have the same value, after zero-extending
-/// one of them (if needed!) to ensure that the bit-widths match.
-static bool IsSameValue(const llvm::APInt &I1, const llvm::APInt &I2) {
-  if (I1.getBitWidth() == I2.getBitWidth())
-    return I1 == I2;
-  
-  if (I1.getBitWidth() > I2.getBitWidth())
-    return I1 == I2.zext(I1.getBitWidth());
-  
-  return I1.zext(I2.getBitWidth()) == I2;
-}
-
-/// \brief Determine if two APSInts have the same value, zero- or sign-extending
-/// as needed.
-static bool IsSameValue(const llvm::APSInt &I1, const llvm::APSInt &I2) {
-  if (I1.getBitWidth() == I2.getBitWidth() && I1.isSigned() == I2.isSigned())
-    return I1 == I2;
-  
-  // Check for a bit-width mismatch.
-  if (I1.getBitWidth() > I2.getBitWidth())
-    return IsSameValue(I1, I2.extend(I1.getBitWidth()));
-  else if (I2.getBitWidth() > I1.getBitWidth())
-    return IsSameValue(I1.extend(I2.getBitWidth()), I2);
-  
-  // We have a signedness mismatch. Turn the signed value into an unsigned 
-  // value.
-  if (I1.isSigned()) {
-    if (I1.isNegative())
-      return false;
-    
-    return llvm::APSInt(I1, true) == I2;
-  }
- 
-  if (I2.isNegative())
-    return false;
-  
-  return I1 == llvm::APSInt(I2, true);
-}
-
 /// \brief Determine structural equivalence of two expressions.
 static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
                                      Expr *E1, Expr *E2) {
@@ -322,7 +283,7 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
                                           Arg2.getIntegralType()))
       return false;
     
-    return IsSameValue(*Arg1.getAsIntegral(), *Arg2.getAsIntegral());
+    return llvm::APSInt::isSameValue(Arg1.getAsIntegral(), Arg2.getAsIntegral());
       
   case TemplateArgument::Declaration:
     if (!Arg1.getAsDecl() || !Arg2.getAsDecl())
@@ -467,7 +428,7 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
   case Type::ConstantArray: {
     const ConstantArrayType *Array1 = cast<ConstantArrayType>(T1);
     const ConstantArrayType *Array2 = cast<ConstantArrayType>(T2);
-    if (!IsSameValue(Array1->getSize(), Array2->getSize()))
+    if (!llvm::APInt::isSameValue(Array1->getSize(), Array2->getSize()))
       return false;
     
     if (!IsArrayStructurallyEquivalent(Context, Array1, Array2))
@@ -1017,7 +978,7 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
       return false;
     }
     
-    if (!IsStructurallyEquivalent(Context, &*Field1, &*Field2))
+    if (!IsStructurallyEquivalent(Context, *Field1, *Field2))
       return false;    
   }
   
@@ -1053,7 +1014,7 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
     
     llvm::APSInt Val1 = EC1->getInitVal();
     llvm::APSInt Val2 = EC2->getInitVal();
-    if (!IsSameValue(Val1, Val2) || 
+    if (!llvm::APSInt::isSameValue(Val1, Val2) || 
         !IsStructurallyEquivalent(EC1->getIdentifier(), EC2->getIdentifier())) {
       Context.Diag2(D2->getLocation(), diag::warn_odr_tag_type_inconsistent)
         << Context.C2.getTypeDeclType(D2);
@@ -1858,14 +1819,8 @@ bool ASTNodeImporter::ImportDefinition(RecordDecl *From, RecordDecl *To,
       = FromData.HasConstexprNonCopyMoveConstructor;
     ToData.DefaultedDefaultConstructorIsConstexpr
       = FromData.DefaultedDefaultConstructorIsConstexpr;
-    ToData.DefaultedCopyConstructorIsConstexpr
-      = FromData.DefaultedCopyConstructorIsConstexpr;
-    ToData.DefaultedMoveConstructorIsConstexpr
-      = FromData.DefaultedMoveConstructorIsConstexpr;
     ToData.HasConstexprDefaultConstructor
       = FromData.HasConstexprDefaultConstructor;
-    ToData.HasConstexprCopyConstructor = FromData.HasConstexprCopyConstructor;
-    ToData.HasConstexprMoveConstructor = FromData.HasConstexprMoveConstructor;
     ToData.HasTrivialCopyConstructor = FromData.HasTrivialCopyConstructor;
     ToData.HasTrivialMoveConstructor = FromData.HasTrivialMoveConstructor;
     ToData.HasTrivialCopyAssignment = FromData.HasTrivialCopyAssignment;
@@ -1992,7 +1947,7 @@ ASTNodeImporter::ImportTemplateArgument(const TemplateArgument &From) {
     QualType ToType = Importer.Import(From.getIntegralType());
     if (ToType.isNull())
       return TemplateArgument();
-    return TemplateArgument(*From.getAsIntegral(), ToType);
+    return TemplateArgument(From, ToType);
   }
 
   case TemplateArgument::Declaration:
@@ -2662,7 +2617,7 @@ Decl *ASTNodeImporter::VisitFieldDecl(FieldDecl *D) {
                                          Importer.Import(D->getInnerLocStart()),
                                          Loc, Name.getAsIdentifierInfo(),
                                          T, TInfo, BitWidth, D->isMutable(),
-                                         D->hasInClassInitializer());
+                                         D->getInClassInitStyle());
   ToField->setAccess(D->getAccess());
   ToField->setLexicalDeclContext(LexicalDC);
   if (ToField->hasInClassInitializer())
