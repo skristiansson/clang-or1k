@@ -1040,17 +1040,14 @@ void Clang::AddOR1KTargetArgs(const ArgList &Args,
 
   if (FloatABI == "hard") {
     // Floating point operations and argument passing are hard.
-    assert(FloatABI == "hard" && "Invalid float abi!");
     CmdArgs.push_back("-mfloat-abi");
     CmdArgs.push_back("hard");
-
-    CmdArgs.push_back("-target-feature");
-    CmdArgs.push_back("+float");
   } else {
-     // Floating point operations and argument passing are soft.
-     CmdArgs.push_back("-msoft-float");
-     CmdArgs.push_back("-mfloat-abi");
-     CmdArgs.push_back("soft");
+    // Floating point operations and argument passing are soft.
+    assert(FloatABI == "soft" && "Invalid float abi!");
+    CmdArgs.push_back("-msoft-float");
+    CmdArgs.push_back("-mfloat-abi");
+    CmdArgs.push_back("soft");
   }
 
   if (Arg *A = Args.getLastArg(options::OPT_mhard_div,
