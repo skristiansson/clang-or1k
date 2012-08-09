@@ -11,6 +11,7 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/CommentLexer.h"
 #include "clang/AST/CommentBriefParser.h"
+#include "clang/AST/CommentCommandTraits.h"
 #include "llvm/ADT/STLExtras.h"
 
 using namespace clang;
@@ -134,9 +135,16 @@ const char *RawComment::extractBriefText(const ASTContext &Context) const {
   // Make sure that RawText is valid.
   getRawText(Context.getSourceManager());
 
-  comments::Lexer L(Range.getBegin(), comments::CommentOptions(),
+  // Since we will be copying the resulting text, all allocations made during
+  // parsing are garbage after resulting string is formed.  Thus we can use
+  // a separate allocator for all temporary stuff.
+  llvm::BumpPtrAllocator Allocator;
+
+  comments::CommandTraits Traits;
+  comments::Lexer L(Allocator, Traits,
+                    Range.getBegin(), comments::CommentOptions(),
                     RawText.begin(), RawText.end());
-  comments::BriefParser P(L);
+  comments::BriefParser P(L, Traits);
 
   const std::string Result = P.Parse();
   const unsigned BriefTextLength = Result.size();

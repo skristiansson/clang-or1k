@@ -445,6 +445,26 @@ public:
                            const ActionList &Inputs) const;
 };
 
+class LLVM_LIBRARY_VISIBILITY Bitrig : public Generic_ELF {
+public:
+  Bitrig(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
+
+  virtual bool IsMathErrnoDefault() const { return false; }
+  virtual bool IsObjCNonFragileABIDefault() const { return true; }
+  virtual bool IsObjCLegacyDispatchDefault() const { return false; }
+
+  virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
+                           const ActionList &Inputs) const;
+
+  virtual void AddClangCXXStdlibIncludeArgs(const ArgList &DriverArgs,
+                                            ArgStringList &CC1Args) const;
+  virtual void AddCXXStdlibLibArgs(const ArgList &Args,
+                                   ArgStringList &CmdArgs) const;
+  virtual unsigned GetDefaultStackProtectorLevel(bool KernelOrKext) const {
+     return 1;
+  }
+};
+
 class LLVM_LIBRARY_VISIBILITY OR1KLinux : public Generic_ELF {
 public:
   OR1KLinux(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
@@ -548,6 +568,10 @@ public:
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;
+
+  virtual bool IsObjCDefaultSynthPropertiesDefault() const {
+    return true;
+  }
 
   virtual bool IsIntegratedAssemblerDefault() const;
   virtual bool IsUnwindTablesDefault() const;

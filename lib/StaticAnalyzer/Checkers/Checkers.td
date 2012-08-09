@@ -84,6 +84,10 @@ def StackAddrEscapeChecker : Checker<"StackAddressEscape">,
   HelpText<"Check that addresses to stack memory do not escape the function">,
   DescFile<"StackAddrEscapeChecker.cpp">;
 
+def DynamicTypePropagation : Checker<"DynamicTypePropagation">,
+  HelpText<"Generate dynamic type information">,
+  DescFile<"DynamicTypePropagation.cpp">;
+
 } // end "core"
 
 let ParentPackage = CoreExperimental in {
@@ -167,10 +171,6 @@ def ReturnUndefChecker : Checker<"UndefReturn">,
 //===----------------------------------------------------------------------===//
 
 let ParentPackage = CplusplusExperimental in {
-
-def IteratorsChecker : Checker<"Iterators">,
-  HelpText<"Check improper uses of STL vector iterators">,
-  DescFile<"IteratorsChecker.cpp">;
 
 def VirtualCallChecker : Checker<"VirtualCall">,
   HelpText<"Check virtual function calls during construction or destruction">, 

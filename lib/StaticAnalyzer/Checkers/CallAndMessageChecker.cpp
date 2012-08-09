@@ -15,7 +15,7 @@
 #include "ClangSACheckers.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
 #include "clang/StaticAnalyzer/Core/CheckerManager.h"
-#include "clang/StaticAnalyzer/Core/PathSensitive/Calls.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/CallEvent.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 #include "clang/AST/ParentMap.h"
@@ -31,9 +31,12 @@ class CallAndMessageChecker
                     check::PreCall > {
   mutable OwningPtr<BugType> BT_call_null;
   mutable OwningPtr<BugType> BT_call_undef;
+  mutable OwningPtr<BugType> BT_cxx_call_null;
+  mutable OwningPtr<BugType> BT_cxx_call_undef;
   mutable OwningPtr<BugType> BT_call_arg;
   mutable OwningPtr<BugType> BT_msg_undef;
   mutable OwningPtr<BugType> BT_objc_prop_undef;
+  mutable OwningPtr<BugType> BT_objc_subscript_undef;
   mutable OwningPtr<BugType> BT_msg_arg;
   mutable OwningPtr<BugType> BT_msg_ret;
 public:
@@ -45,10 +48,10 @@ public:
 private:
   static bool PreVisitProcessArg(CheckerContext &C, SVal V,
                                  SourceRange argRange, const Expr *argEx,
-                                 const bool checkUninitFields,
-                                 const char *BT_desc, OwningPtr<BugType> &BT);
+                                 bool IsFirstArgument, bool checkUninitFields,
+                                 const CallEvent &Call, OwningPtr<BugType> &BT);
 
-  static void EmitBadCall(BugType *BT, CheckerContext &C, const CallExpr *CE);
+  static void emitBadCall(BugType *BT, CheckerContext &C, const Expr *BadE);
   void emitNilReceiverBug(CheckerContext &C, const ObjCMethodCall &msg,
                           ExplodedNode *N) const;
 
@@ -63,34 +66,63 @@ private:
 };
 } // end anonymous namespace
 
-void CallAndMessageChecker::EmitBadCall(BugType *BT, CheckerContext &C,
-                                        const CallExpr *CE) {
+void CallAndMessageChecker::emitBadCall(BugType *BT, CheckerContext &C,
+                                        const Expr *BadE) {
   ExplodedNode *N = C.generateSink();
   if (!N)
     return;
 
   BugReport *R = new BugReport(*BT, BT->getName(), N);
-  R->addVisitor(bugreporter::getTrackNullOrUndefValueVisitor(N,
-                               bugreporter::GetCalleeExpr(N), R));
+  if (BadE) {
+    R->addRange(BadE->getSourceRange());
+    bugreporter::addTrackNullOrUndefValueVisitor(N, BadE, R);
+  }
   C.EmitReport(R);
+}
+
+StringRef describeUninitializedArgumentInCall(const CallEvent &Call,
+                                              bool IsFirstArgument) {
+  switch (Call.getKind()) {
+  case CE_ObjCMessage: {
+    const ObjCMethodCall &Msg = cast<ObjCMethodCall>(Call);
+    switch (Msg.getMessageKind()) {
+    case OCM_Message:
+      return "Argument in message expression is an uninitialized value";
+    case OCM_PropertyAccess:
+      assert(Msg.isSetter() && "Getters have no args");
+      return "Argument for property setter is an uninitialized value";
+    case OCM_Subscript:
+      if (Msg.isSetter() && IsFirstArgument)
+        return "Argument for subscript setter is an uninitialized value";
+      return "Subscript index is an uninitialized value";
+    }
+    llvm_unreachable("Unknown message kind.");
+  }
+  case CE_Block:
+    return "Block call argument is an uninitialized value";
+  default:
+    return "Function call argument is an uninitialized value";
+  }
 }
 
 bool CallAndMessageChecker::PreVisitProcessArg(CheckerContext &C,
                                                SVal V, SourceRange argRange,
                                                const Expr *argEx,
-                                               const bool checkUninitFields,
-                                               const char *BT_desc,
+                                               bool IsFirstArgument,
+                                               bool checkUninitFields,
+                                               const CallEvent &Call,
                                                OwningPtr<BugType> &BT) {
   if (V.isUndef()) {
     if (ExplodedNode *N = C.generateSink()) {
       LazyInit_BT("Uninitialized argument value", BT);
 
       // Generate a report for this bug.
-      BugReport *R = new BugReport(*BT, BT_desc, N);
+      StringRef Desc = describeUninitializedArgumentInCall(Call,
+                                                           IsFirstArgument);
+      BugReport *R = new BugReport(*BT, Desc, N);
       R->addRange(argRange);
       if (argEx)
-        R->addVisitor(bugreporter::getTrackNullOrUndefValueVisitor(N, argEx,
-                                                                   R));
+        bugreporter::addTrackNullOrUndefValueVisitor(N, argEx, R);
       C.EmitReport(R);
     }
     return true;
@@ -148,7 +180,7 @@ bool CallAndMessageChecker::PreVisitProcessArg(CheckerContext &C,
 
     if (F.Find(D->getRegion())) {
       if (ExplodedNode *N = C.generateSink()) {
-        LazyInit_BT(BT_desc, BT);
+        LazyInit_BT("Uninitialized argument value", BT);
         SmallString<512> Str;
         llvm::raw_svector_ostream os(Str);
         os << "Passed-by-value struct argument contains uninitialized data";
@@ -196,56 +228,68 @@ void CallAndMessageChecker::checkPreStmt(const CallExpr *CE,
     if (!BT_call_undef)
       BT_call_undef.reset(new BuiltinBug("Called function pointer is an "
                                          "uninitalized pointer value"));
-    EmitBadCall(BT_call_undef.get(), C, CE);
+    emitBadCall(BT_call_undef.get(), C, Callee);
     return;
   }
 
-  if (L.isZeroConstant()) {
+  ProgramStateRef StNonNull, StNull;
+  llvm::tie(StNonNull, StNull) = State->assume(cast<DefinedOrUnknownSVal>(L));
+
+  // FIXME: Do we want to record the non-null assumption here?
+  if (StNull && !StNonNull) {
     if (!BT_call_null)
       BT_call_null.reset(
         new BuiltinBug("Called function pointer is null (null dereference)"));
-    EmitBadCall(BT_call_null.get(), C, CE);
+    emitBadCall(BT_call_null.get(), C, Callee);
   }
 }
 
 void CallAndMessageChecker::checkPreCall(const CallEvent &Call,
                                          CheckerContext &C) const {
+  // If this is a call to a C++ method, check if the callee is null or
+  // undefined.
+  if (const CXXInstanceCall *CC = dyn_cast<CXXInstanceCall>(&Call)) {
+    SVal V = CC->getCXXThisVal();
+    if (V.isUndef()) {
+      if (!BT_cxx_call_undef)
+        BT_cxx_call_undef.reset(new BuiltinBug("Called C++ object pointer is "
+                                               "uninitialized"));
+      emitBadCall(BT_cxx_call_undef.get(), C, CC->getCXXThisExpr());
+      return;
+    }
+
+    ProgramStateRef State = C.getState();
+    ProgramStateRef StNonNull, StNull;
+    llvm::tie(StNonNull, StNull) = State->assume(cast<DefinedOrUnknownSVal>(V));
+
+    // FIXME: Do we want to record the non-null assumption here?
+    if (StNull && !StNonNull) {
+      if (!BT_cxx_call_null)
+        BT_cxx_call_null.reset(new BuiltinBug("Called C++ object pointer "
+                                              "is null"));
+      emitBadCall(BT_cxx_call_null.get(), C, CC->getCXXThisExpr());
+      return;
+    }
+  }
+
   // Don't check for uninitialized field values in arguments if the
   // caller has a body that is available and we have the chance to inline it.
   // This is a hack, but is a reasonable compromise betweens sometimes warning
   // and sometimes not depending on if we decide to inline a function.
   const Decl *D = Call.getDecl();
   const bool checkUninitFields =
-    !(C.getAnalysisManager().shouldInlineCall() &&
-      (D && D->getBody()));
+    !(C.getAnalysisManager().shouldInlineCall() && (D && D->getBody()));
 
   OwningPtr<BugType> *BT;
-  const char *Desc;
-
-  switch (Call.getKind()) {
-  case CE_ObjCPropertyAccess:
+  if (isa<ObjCMethodCall>(Call))
     BT = &BT_msg_arg;
-    // Getters do not have arguments, so we don't need to worry about this.
-    Desc = "Argument for property setter is an uninitialized value";
-    break;
-  case CE_ObjCMessage:
-    BT = &BT_msg_arg;
-    Desc = "Argument in message expression is an uninitialized value";
-    break;
-  case CE_Block:
+  else
     BT = &BT_call_arg;
-    Desc = "Block call argument is an uninitialized value";
-    break;
-  default:
-    BT = &BT_call_arg;
-    Desc = "Function call argument is an uninitialized value";
-    break;
-  }
 
   for (unsigned i = 0, e = Call.getNumArgs(); i != e; ++i)
-    if (PreVisitProcessArg(C, Call.getArgSVal(i),
-                           Call.getArgSourceRange(i), Call.getArgExpr(i),
-                           checkUninitFields, Desc, *BT))
+    if (PreVisitProcessArg(C, Call.getArgSVal(i), Call.getArgSourceRange(i),
+                           Call.getArgExpr(i), /*IsFirstArgument=*/i == 0,
+                           checkUninitFields, Call, *BT))
       return;
 }
 
@@ -255,25 +299,37 @@ void CallAndMessageChecker::checkPreObjCMessage(const ObjCMethodCall &msg,
   if (recVal.isUndef()) {
     if (ExplodedNode *N = C.generateSink()) {
       BugType *BT = 0;
-      if (isa<ObjCPropertyAccess>(msg)) {
-        if (!BT_objc_prop_undef)
-          BT_objc_prop_undef.reset(new BuiltinBug("Property access on an "
-                                                  "uninitialized object pointer"));
-        BT = BT_objc_prop_undef.get();
-      } else {
+      switch (msg.getMessageKind()) {
+      case OCM_Message:
         if (!BT_msg_undef)
           BT_msg_undef.reset(new BuiltinBug("Receiver in message expression "
                                             "is an uninitialized value"));
         BT = BT_msg_undef.get();
+        break;
+      case OCM_PropertyAccess:
+        if (!BT_objc_prop_undef)
+          BT_objc_prop_undef.reset(new BuiltinBug("Property access on an "
+                                                  "uninitialized object "
+                                                  "pointer"));
+        BT = BT_objc_prop_undef.get();
+        break;
+      case OCM_Subscript:
+        if (!BT_objc_subscript_undef)
+          BT_objc_subscript_undef.reset(new BuiltinBug("Subscript access on an "
+                                                       "uninitialized object "
+                                                       "pointer"));
+        BT = BT_objc_subscript_undef.get();
+        break;
       }
+      assert(BT && "Unknown message kind.");
+
       BugReport *R = new BugReport(*BT, BT->getName(), N);
-      R->addRange(msg.getReceiverSourceRange());
+      const ObjCMessageExpr *ME = msg.getOriginExpr();
+      R->addRange(ME->getReceiverRange());
 
       // FIXME: getTrackNullOrUndefValueVisitor can't handle "super" yet.
-      if (const Expr *ReceiverE = msg.getInstanceReceiverExpr())
-        R->addVisitor(bugreporter::getTrackNullOrUndefValueVisitor(N,
-                                                                   ReceiverE,
-                                                                   R));
+      if (const Expr *ReceiverE = ME->getInstanceReceiver())
+        bugreporter::addTrackNullOrUndefValueVisitor(N, ReceiverE, R);
       C.EmitReport(R);
     }
     return;
@@ -302,20 +358,20 @@ void CallAndMessageChecker::emitNilReceiverBug(CheckerContext &C,
       new BuiltinBug("Receiver in message expression is "
                      "'nil' and returns a garbage value"));
 
+  const ObjCMessageExpr *ME = msg.getOriginExpr();
+
   SmallString<200> buf;
   llvm::raw_svector_ostream os(buf);
-  os << "The receiver of message '" << msg.getSelector().getAsString()
+  os << "The receiver of message '" << ME->getSelector().getAsString()
      << "' is nil and returns a value of type '";
   msg.getResultType().print(os, C.getLangOpts());
   os << "' that will be garbage";
 
   BugReport *report = new BugReport(*BT_msg_ret, os.str(), N);
-  report->addRange(msg.getReceiverSourceRange());
+  report->addRange(ME->getReceiverRange());
   // FIXME: This won't track "self" in messages to super.
-  if (const Expr *receiver = msg.getInstanceReceiverExpr()) {
-    report->addVisitor(bugreporter::getTrackNullOrUndefValueVisitor(N,
-                                                                    receiver,
-                                                                    report));
+  if (const Expr *receiver = ME->getInstanceReceiver()) {
+    bugreporter::addTrackNullOrUndefValueVisitor(N, receiver, report);
   }
   C.EmitReport(report);
 }

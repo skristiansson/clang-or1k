@@ -1,4 +1,5 @@
-RUN: diagtool list-warnings | FileCheck %s
+RUN: diagtool list-warnings > %t 2>&1
+RUN: FileCheck --input-file=%t %s
 
 This test serves two purposes:
 
@@ -17,7 +18,7 @@ This test serves two purposes:
 
 The list of warnings below should NEVER grow.  It should gradually shrink to 0.
 
-CHECK: Warnings without flags (131):
+CHECK: Warnings without flags (128):
 CHECK-NEXT:   pp_include_next_absolute_path
 CHECK-NEXT:   pp_include_next_in_primary
 CHECK-NEXT:   pp_invalid_string_literal
@@ -50,13 +51,11 @@ CHECK-NEXT:   warn_delete_array_type
 CHECK-NEXT:   warn_double_const_requires_fp64
 CHECK-NEXT:   warn_drv_assuming_mfloat_abi_is
 CHECK-NEXT:   warn_drv_clang_unsupported
-CHECK-NEXT:   warn_drv_input_file_unused
 CHECK-NEXT:   warn_drv_not_using_clang_arch
 CHECK-NEXT:   warn_drv_not_using_clang_cpp
 CHECK-NEXT:   warn_drv_not_using_clang_cxx
 CHECK-NEXT:   warn_drv_objc_gc_unsupported
 CHECK-NEXT:   warn_drv_pch_not_first_include
-CHECK-NEXT:   warn_drv_preprocessed_input_file_unused
 CHECK-NEXT:   warn_dup_category_def
 CHECK-NEXT:   warn_duplicate_protocol_def
 CHECK-NEXT:   warn_enum_too_large
@@ -144,14 +143,11 @@ CHECK-NEXT:   warn_undef_interface
 CHECK-NEXT:   warn_undef_interface_suggest
 CHECK-NEXT:   warn_undef_protocolref
 CHECK-NEXT:   warn_undefined_internal
-CHECK-NEXT:   warn_unknown_analyzer_checker
 CHECK-NEXT:   warn_unknown_method_family
 CHECK-NEXT:   warn_use_out_of_scope_declaration
 CHECK-NEXT:   warn_weak_identifier_undeclared
 CHECK-NEXT:   warn_weak_import
 
-The list of warnings in -Wpedenatic should NEVER grow.
+The list of warnings in -Wpedantic should NEVER grow.
 
-CHECK: Number in -Wpedantic (not covered by other -W flags): 71
-
-
+CHECK: Number in -Wpedantic (not covered by other -W flags): 70

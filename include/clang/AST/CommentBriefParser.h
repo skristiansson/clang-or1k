@@ -20,10 +20,17 @@
 namespace clang {
 namespace comments {
 
-/// A very simple comment parser that extracts just the brief description or
-/// first paragraph.
+/// A very simple comment parser that extracts "a brief description".
+///
+/// Due to a variety of comment styles, it considers the following as "a brief
+/// description", in order of priority:
+/// \li a \\brief or \\short command,
+/// \li the first paragraph,
+/// \li a \\result or \\return or \\returns paragraph.
 class BriefParser {
   Lexer &L;
+
+  const CommandTraits &Traits;
 
   /// Current lookahead token.
   Token Tok;
@@ -35,7 +42,7 @@ class BriefParser {
   }
 
 public:
-  BriefParser(Lexer &L);
+  BriefParser(Lexer &L, const CommandTraits &Traits);
 
   /// Return \\brief paragraph, if it exists; otherwise return the first
   /// paragraph.

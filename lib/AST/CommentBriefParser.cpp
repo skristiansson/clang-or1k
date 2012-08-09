@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/CommentBriefParser.h"
+#include "clang/AST/CommentCommandTraits.h"
 #include "llvm/ADT/StringSwitch.h"
 
 namespace clang {
@@ -39,46 +40,45 @@ void cleanupBrief(std::string &S) {
 
   S.resize(O - S.begin());
 }
-
-bool isBlockCommand(StringRef Name) {
-  return llvm::StringSwitch<bool>(Name)
-      .Case("brief", true)
-      .Case("result", true)
-      .Case("return", true)
-      .Case("returns", true)
-      .Case("author", true)
-      .Case("authors", true)
-      .Case("pre", true)
-      .Case("post", true)
-      .Case("param", true)
-      .Case("arg", true)
-      .Default(false);
-}
 } // unnamed namespace
 
+BriefParser::BriefParser(Lexer &L, const CommandTraits &Traits) :
+    L(L), Traits(Traits) {
+  // Get lookahead token.
+  ConsumeToken();
+}
+
 std::string BriefParser::Parse() {
-  std::string Paragraph;
+  std::string FirstParagraphOrBrief;
+  std::string ReturnsParagraph;
   bool InFirstParagraph = true;
   bool InBrief = false;
+  bool InReturns = false;
 
   while (Tok.isNot(tok::eof)) {
     if (Tok.is(tok::text)) {
       if (InFirstParagraph || InBrief)
-        Paragraph += Tok.getText();
+        FirstParagraphOrBrief += Tok.getText();
+      else if (InReturns)
+        ReturnsParagraph += Tok.getText();
       ConsumeToken();
       continue;
     }
 
     if (Tok.is(tok::command)) {
       StringRef Name = Tok.getCommandName();
-      if (Name == "brief") {
-        Paragraph.clear();
+      if (Traits.isBriefCommand(Name)) {
+        FirstParagraphOrBrief.clear();
         InBrief = true;
         ConsumeToken();
         continue;
       }
+      if (Traits.isReturnsCommand(Name)) {
+        InReturns = true;
+        ReturnsParagraph += "Returns ";
+      }
       // Block commands implicitly start a new paragraph.
-      if (isBlockCommand(Name)) {
+      if (Traits.isBlockCommand(Name)) {
         // We found an implicit paragraph end.
         InFirstParagraph = false;
         if (InBrief)
@@ -88,13 +88,16 @@ std::string BriefParser::Parse() {
 
     if (Tok.is(tok::newline)) {
       if (InFirstParagraph || InBrief)
-        Paragraph += ' ';
+        FirstParagraphOrBrief += ' ';
+      else if (InReturns)
+        ReturnsParagraph += ' ';
       ConsumeToken();
 
       if (Tok.is(tok::newline)) {
         ConsumeToken();
         // We found a paragraph end.
         InFirstParagraph = false;
+        InReturns = false;
         if (InBrief)
           break;
       }
@@ -105,14 +108,12 @@ std::string BriefParser::Parse() {
     ConsumeToken();
   }
 
-  cleanupBrief(Paragraph);
-  return Paragraph;
-}
+  cleanupBrief(FirstParagraphOrBrief);
+  if (!FirstParagraphOrBrief.empty())
+    return FirstParagraphOrBrief;
 
-BriefParser::BriefParser(Lexer &L) : L(L)
-{
-  // Get lookahead token.
-  ConsumeToken();
+  cleanupBrief(ReturnsParagraph);
+  return ReturnsParagraph;
 }
 
 } // end namespace comments

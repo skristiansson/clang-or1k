@@ -279,6 +279,8 @@ def note_macro_here : Note<"macro %0 defined here">;
 
 def err_pp_invalid_directive : Error<"invalid preprocessing directive">;
 def err_pp_file_not_found : Error<"'%0' file not found">, DefaultFatal;
+def err_pp_file_not_found_not_fatal : Error<
+  "'%0' file not found with <angled> include; use \"quotes\" instead">;
 def err_pp_error_opening_file : Error<
   "error opening file '%0': %1">, DefaultFatal;
 def err_pp_empty_filename : Error<"empty filename">;
@@ -330,8 +332,7 @@ def err_feature_check_malformed : Error<
   "builtin feature check macro requires a parenthesized identifier">;
 
 def err_warning_check_malformed : Error<
-  "builtin warning check macro requires a parenthesized string">,
-  InGroup<MalformedWarningCheck>;
+  "builtin warning check macro requires a parenthesized string">;
 def warn_has_warning_invalid_option :
    ExtWarn<"__has_warning expected option name (e.g. \"-Wundef\")">,
    InGroup<MalformedWarningCheck>;

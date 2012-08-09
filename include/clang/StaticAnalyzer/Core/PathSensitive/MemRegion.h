@@ -52,11 +52,13 @@ class RegionOffset {
   int64_t Offset;
 
 public:
-  RegionOffset(const MemRegion *r) : R(r), Offset(0) {}
+  RegionOffset() : R(0) {}
   RegionOffset(const MemRegion *r, int64_t off) : R(r), Offset(off) {}
 
   const MemRegion *getRegion() const { return R; }
   int64_t getOffset() const { return Offset; }
+
+  bool isValid() const { return R; }
 };
 
 //===----------------------------------------------------------------------===//
@@ -148,8 +150,11 @@ public:
 
   void dump() const;
 
+  /// \brief Returns true if this region can be printed in a user-friendly way.
+  virtual bool canPrintPretty() const;
+
   /// \brief Print the region for use in diagnostics.
-  virtual void dumpPretty(raw_ostream &os) const;
+  virtual void printPretty(raw_ostream &os) const;
 
   Kind getKind() const { return kind; }
 
@@ -490,6 +495,8 @@ public:
     return T.getTypePtrOrNull() ? T.getDesugaredType(Context) : T;
   }
 
+  DefinedOrUnknownSVal getExtent(SValBuilder &svalBuilder) const;
+
   static bool classof(const MemRegion* R) {
     unsigned k = R->getKind();
     return k >= BEG_TYPED_VALUE_REGIONS && k <= END_TYPED_VALUE_REGIONS;
@@ -806,8 +813,6 @@ public:
   const Decl *getDecl() const { return D; }
   void Profile(llvm::FoldingSetNodeID& ID) const;
 
-  DefinedOrUnknownSVal getExtent(SValBuilder &svalBuilder) const;
-
   static bool classof(const MemRegion* R) {
     unsigned k = R->getKind();
     return k >= BEG_DECL_REGIONS && k <= END_DECL_REGIONS;
@@ -844,7 +849,8 @@ public:
     return R->getKind() == VarRegionKind;
   }
 
-  void dumpPretty(raw_ostream &os) const;
+  bool canPrintPretty() const;
+  void printPretty(raw_ostream &os) const;
 };
   
 /// CXXThisRegion - Represents the region for the implicit 'this' parameter
@@ -903,7 +909,9 @@ public:
   }
 
   void dumpToStream(raw_ostream &os) const;
-  void dumpPretty(raw_ostream &os) const;
+
+  bool canPrintPretty() const;
+  void printPretty(raw_ostream &os) const;
 };
 
 class ObjCIvarRegion : public DeclRegion {

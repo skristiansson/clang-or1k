@@ -1151,11 +1151,10 @@ static bool EvaluateAsBooleanCondition(const Expr *E, bool &Result,
 }
 
 template<typename T>
-static bool HandleOverflow(EvalInfo &Info, const Expr *E,
+static void HandleOverflow(EvalInfo &Info, const Expr *E,
                            const T &SrcValue, QualType DestType) {
-  Info.Diag(E, diag::note_constexpr_overflow)
+  Info.CCEDiag(E, diag::note_constexpr_overflow)
     << SrcValue << DestType;
-  return false;
 }
 
 static bool HandleFloatToIntCast(EvalInfo &Info, const Expr *E,
@@ -1169,7 +1168,7 @@ static bool HandleFloatToIntCast(EvalInfo &Info, const Expr *E,
   bool ignored;
   if (Value.convertToInteger(Result, llvm::APFloat::rmTowardZero, &ignored)
       & APFloat::opInvalidOp)
-    return HandleOverflow(Info, E, Value, DestType);
+    HandleOverflow(Info, E, Value, DestType);
   return true;
 }
 
@@ -1181,7 +1180,7 @@ static bool HandleFloatToFloatCast(EvalInfo &Info, const Expr *E,
   if (Result.convert(Info.Ctx.getFloatTypeSemantics(DestType),
                      APFloat::rmNearestTiesToEven, &ignored)
       & APFloat::opOverflow)
-    return HandleOverflow(Info, E, Value, DestType);
+    HandleOverflow(Info, E, Value, DestType);
   return true;
 }
 
@@ -1204,7 +1203,7 @@ static bool HandleIntToFloatCast(EvalInfo &Info, const Expr *E,
   if (Result.convertFromAPInt(Value, Value.isSigned(),
                               APFloat::rmNearestTiesToEven)
       & APFloat::opOverflow)
-    return HandleOverflow(Info, E, Value, DestType);
+    HandleOverflow(Info, E, Value, DestType);
   return true;
 }
 
@@ -2277,84 +2276,6 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
 
   return Success;
 }
-
-namespace {
-class HasSideEffect
-  : public ConstStmtVisitor<HasSideEffect, bool> {
-  const ASTContext &Ctx;
-public:
-
-  HasSideEffect(const ASTContext &C) : Ctx(C) {}
-
-  // Unhandled nodes conservatively default to having side effects.
-  bool VisitStmt(const Stmt *S) {
-    return true;
-  }
-
-  bool VisitParenExpr(const ParenExpr *E) { return Visit(E->getSubExpr()); }
-  bool VisitGenericSelectionExpr(const GenericSelectionExpr *E) {
-    return Visit(E->getResultExpr());
-  }
-  bool VisitDeclRefExpr(const DeclRefExpr *E) {
-    if (Ctx.getCanonicalType(E->getType()).isVolatileQualified())
-      return true;
-    return false;
-  }
-  bool VisitObjCIvarRefExpr(const ObjCIvarRefExpr *E) {
-    if (Ctx.getCanonicalType(E->getType()).isVolatileQualified())
-      return true;
-    return false;
-  }
-
-  // We don't want to evaluate BlockExprs multiple times, as they generate
-  // a ton of code.
-  bool VisitBlockExpr(const BlockExpr *E) { return true; }
-  bool VisitPredefinedExpr(const PredefinedExpr *E) { return false; }
-  bool VisitCompoundLiteralExpr(const CompoundLiteralExpr *E)
-    { return Visit(E->getInitializer()); }
-  bool VisitMemberExpr(const MemberExpr *E) { return Visit(E->getBase()); }
-  bool VisitIntegerLiteral(const IntegerLiteral *E) { return false; }
-  bool VisitFloatingLiteral(const FloatingLiteral *E) { return false; }
-  bool VisitStringLiteral(const StringLiteral *E) { return false; }
-  bool VisitCharacterLiteral(const CharacterLiteral *E) { return false; }
-  bool VisitUnaryExprOrTypeTraitExpr(const UnaryExprOrTypeTraitExpr *E)
-    { return false; }
-  bool VisitArraySubscriptExpr(const ArraySubscriptExpr *E)
-    { return Visit(E->getLHS()) || Visit(E->getRHS()); }
-  bool VisitChooseExpr(const ChooseExpr *E)
-    { return Visit(E->getChosenSubExpr(Ctx)); }
-  bool VisitAbstractConditionalOperator(const AbstractConditionalOperator *E)
-    { return Visit(E->getCond()) || Visit(E->getTrueExpr())
-      || Visit(E->getFalseExpr()); }
-  bool VisitCastExpr(const CastExpr *E) { return Visit(E->getSubExpr()); }
-  bool VisitBinAssign(const BinaryOperator *E) { return true; }
-  bool VisitCompoundAssignOperator(const BinaryOperator *E) { return true; }
-  bool VisitBinaryOperator(const BinaryOperator *E)
-  { return Visit(E->getLHS()) || Visit(E->getRHS()); }
-  bool VisitUnaryPreInc(const UnaryOperator *E) { return true; }
-  bool VisitUnaryPostInc(const UnaryOperator *E) { return true; }
-  bool VisitUnaryPreDec(const UnaryOperator *E) { return true; }
-  bool VisitUnaryPostDec(const UnaryOperator *E) { return true; }
-  bool VisitUnaryDeref(const UnaryOperator *E) {
-    if (Ctx.getCanonicalType(E->getType()).isVolatileQualified())
-      return true;
-    return Visit(E->getSubExpr());
-  }
-  bool VisitUnaryOperator(const UnaryOperator *E) { return Visit(E->getSubExpr()); }
-    
-  // Has side effects if any element does.
-  bool VisitInitListExpr(const InitListExpr *E) {
-    for (unsigned i = 0, e = E->getNumInits(); i != e; ++i)
-      if (Visit(E->getInit(i))) return true;
-    if (const Expr *filler = E->getArrayFiller())
-      return Visit(filler);
-    return false;
-  }
-    
-  bool VisitSizeOfPackExpr(const SizeOfPackExpr *) { return false; }
-};
-
-} // end anonymous namespace
 
 //===----------------------------------------------------------------------===//
 // Generic Evaluation
@@ -4350,9 +4271,9 @@ bool IntExprEvaluator::VisitCallExpr(const CallExpr *E) {
     if (TryEvaluateBuiltinObjectSize(E))
       return true;
 
-    // If evaluating the argument has side-effects we can't determine
-    // the size of the object and lower it to unknown now. CodeGen relies on
-    // us to handle all cases where the expression has side-effects.
+    // If evaluating the argument has side-effects, we can't determine the size
+    // of the object, and so we lower it to unknown now. CodeGen relies on us to
+    // handle all cases where the expression has side-effects.
     if (E->getArg(0)->HasSideEffects(Info.Ctx)) {
       if (E->getArg(1)->EvaluateKnownConstInt(Info.Ctx).getZExtValue() <= 1)
         return Success(-1ULL, E);
@@ -6415,10 +6336,6 @@ bool Expr::EvaluateAsInitializer(APValue &Value, const ASTContext &Ctx,
 bool Expr::isEvaluatable(const ASTContext &Ctx) const {
   EvalResult Result;
   return EvaluateAsRValue(Result, Ctx) && !Result.HasSideEffects;
-}
-
-bool Expr::HasSideEffects(const ASTContext &Ctx) const {
-  return HasSideEffect(Ctx).Visit(this);
 }
 
 APSInt Expr::EvaluateKnownConstInt(const ASTContext &Ctx) const {

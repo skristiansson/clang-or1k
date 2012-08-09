@@ -31,8 +31,14 @@ def ext_extra_semi : Extension<
   "outside of a function|"
   "inside a %1|"
   "inside instance variable list|"
-  "after function definition}0">,
-  InGroup<DiagGroup<"extra-semi">>;
+  "after member function definition}0">,
+  InGroup<ExtraSemi>;
+def ext_extra_semi_cxx11 : Extension<
+  "extra ';' outside of a function is a C++11 extension">,
+  InGroup<CXX11ExtraSemi>;
+def warn_extra_semi_after_mem_fn_def : Warning<
+  "extra ';' after member function definition">,
+  InGroup<ExtraSemi>, DefaultIgnore;
 
 def ext_duplicate_declspec : Extension<"duplicate '%0' declaration specifier">;
 def ext_plain_complex : ExtWarn<
@@ -61,9 +67,12 @@ def ext_c99_compound_literal : Extension<
   "compound literals are a C99-specific feature">, InGroup<C99>;
 def ext_c99_flexible_array_member : Extension<
   "Flexible array members are a C99-specific feature">, InGroup<C99>;
-def ext_enumerator_list_comma : Extension<
-  "commas at the end of enumerator lists are a %select{C99|C++11}0-specific "
-  "feature">;
+def ext_enumerator_list_comma_c : Extension<
+  "commas at the end of enumerator lists are a C99-specific "
+  "feature">, InGroup<C99>;
+def ext_enumerator_list_comma_cxx : Extension<
+  "commas at the end of enumerator lists are a C++11 extension">,
+  InGroup<CXX11>;
 def warn_cxx98_compat_enumerator_list_comma : Warning<
   "commas at the end of enumerator lists are incompatible with C++98">,
   InGroup<CXX98CompatPedantic>, DefaultIgnore;
@@ -384,7 +393,7 @@ def warn_semicolon_before_method_body : Warning<
   "semicolon before method body is ignored">,
   InGroup<DiagGroup<"semicolon-before-method-body">>, DefaultIgnore;
 def note_extra_comma_message_arg : Note<
-  "comma separating objective-c messaging arguments">;
+  "comma separating Objective-C messaging arguments">;
 
 def err_expected_field_designator : Error<
   "expected a field designator, such as '.field = 4'">;
@@ -406,9 +415,6 @@ def err_expected_init_in_condition_lparen : Error<
   "variable declaration in condition cannot have a parenthesized initializer">;
 def err_extraneous_rparen_in_condition : Error<
   "extraneous ')' after condition, expected a statement">;
-def warn_parens_disambiguated_as_function_decl : Warning<
-  "parentheses were disambiguated as a function declarator">,
-  InGroup<VexingParse>;
 def warn_dangling_else : Warning<
   "add explicit braces to avoid dangling else">,
   InGroup<DanglingElse>;

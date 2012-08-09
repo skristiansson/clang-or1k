@@ -735,9 +735,12 @@ OverloadCandidate::DeductionFailureInfo::getSecondArg() {
 }
 
 void OverloadCandidateSet::clear() {
-  for (iterator i = begin(), e = end(); i != e; ++i)
+  for (iterator i = begin(), e = end(); i != e; ++i) {
     for (unsigned ii = 0, ie = i->NumConversions; ii != ie; ++ii)
       i->Conversions[ii].~ImplicitConversionSequence();
+    if (!i->Viable && i->FailureKind == ovl_fail_bad_deduction)
+      i->DeductionFailure.Destroy();
+  }
   NumInlineSequences = 0;
   Candidates.clear();
   Functions.clear();
@@ -2497,7 +2500,7 @@ void Sema::HandleFunctionTypeMismatch(PartialDiagnostic &PDiag,
 /// for equality of their argument types. Caller has already checked that
 /// they have same number of arguments. This routine assumes that Objective-C
 /// pointer types which only differ in their protocol qualifiers are equal.
-/// If the parameters are different, ArgPos will have the the parameter index
+/// If the parameters are different, ArgPos will have the parameter index
 /// of the first different parameter.
 bool Sema::FunctionArgTypesAreEqual(const FunctionProtoType *OldType,
                                     const FunctionProtoType *NewType,
@@ -2559,13 +2562,17 @@ bool Sema::CheckPointerConversion(Expr *From, QualType ToType,
 
   Kind = CK_BitCast;
 
-  if (!IsCStyleOrFunctionalCast &&
-      Context.hasSameUnqualifiedType(From->getType(), Context.BoolTy) &&
-      From->isNullPointerConstant(Context, Expr::NPC_ValueDependentIsNotNull))
-    DiagRuntimeBehavior(From->getExprLoc(), From,
-                        PDiag(diag::warn_impcast_bool_to_null_pointer)
-                          << ToType << From->getSourceRange());
-
+  if (!IsCStyleOrFunctionalCast && !FromType->isAnyPointerType() &&
+      From->isNullPointerConstant(Context, Expr::NPC_ValueDependentIsNotNull) ==
+      Expr::NPCK_ZeroExpression) {
+    if (Context.hasSameUnqualifiedType(From->getType(), Context.BoolTy))
+      DiagRuntimeBehavior(From->getExprLoc(), From,
+                          PDiag(diag::warn_impcast_bool_to_null_pointer)
+                            << ToType << From->getSourceRange());
+    else if (!isUnevaluatedContext())
+      Diag(From->getExprLoc(), diag::warn_non_literal_null_pointer)
+        << ToType << From->getSourceRange();
+  }
   if (const PointerType *ToPtrType = ToType->getAs<PointerType>()) {
     if (const PointerType *FromPtrType = FromType->getAs<PointerType>()) {
       QualType FromPointeeType = FromPtrType->getPointeeType(),
@@ -9329,7 +9336,7 @@ bool Sema::ResolveAndFixSingleFunctionTemplateSpecialization(
       return true;
     }
 
-    // Fix the expresion to refer to 'fn'.
+    // Fix the expression to refer to 'fn'.
     SingleFunctionExpression =
       Owned(FixOverloadedFunctionReference(SrcExpr.take(), found, fn));
 
@@ -10995,7 +11002,7 @@ Sema::BuildCallToObjectOfClassType(Scope *S, Expr *Obj,
   // If this is a variadic call, handle args passed through "...".
   if (Proto->isVariadic()) {
     // Promote the arguments (C99 6.5.2.2p7).
-    for (unsigned i = NumArgsInProto; i != NumArgs; i++) {
+    for (unsigned i = NumArgsInProto; i < NumArgs; i++) {
       ExprResult Arg = DefaultVariadicArgumentPromotion(Args[i], VariadicMethod, 0);
       IsError |= Arg.isInvalid();
       TheCall->setArg(i + 1, Arg.take());

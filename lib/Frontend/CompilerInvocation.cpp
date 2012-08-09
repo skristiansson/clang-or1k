@@ -434,6 +434,7 @@ static const char *getActionName(frontend::ActionKind Kind) {
   case frontend::PluginAction:
     llvm_unreachable("Invalid kind!");
 
+  case frontend::ASTDeclList:            return "-ast-list";
   case frontend::ASTDump:                return "-ast-dump";
   case frontend::ASTDumpXML:             return "-ast-dump-xml";
   case frontend::ASTPrint:               return "-ast-print";
@@ -558,6 +559,8 @@ static void FrontendOptsToArgs(const FrontendOptions &Opts, ToArgsList &Res) {
     for(unsigned i = 0, e = Opts.PluginArgs.size(); i != e; ++i)
       Res.push_back("-plugin-arg-" + Opts.ActionName, Opts.PluginArgs[i]);
   }
+  if (!Opts.ASTDumpFilter.empty())
+    Res.push_back("-ast-dump-filter", Opts.ASTDumpFilter);
   for (unsigned i = 0, e = Opts.Plugins.size(); i != e; ++i)
     Res.push_back("-load", Opts.Plugins[i]);
   for (unsigned i = 0, e = Opts.AddPluginActions.size(); i != e; ++i) {
@@ -1124,7 +1127,6 @@ static bool ParseAnalyzerArgs(AnalyzerOptions &Opts, ArgList &Args,
   Opts.AnalyzeSpecificFunction = Args.getLastArgValue(OPT_analyze_function);
   Opts.UnoptimizedCFG = Args.hasArg(OPT_analysis_UnoptimizedCFG);
   Opts.CFGAddImplicitDtors = Args.hasArg(OPT_analysis_CFGAddImplicitDtors);
-  Opts.CFGAddInitializers = Args.hasArg(OPT_analysis_CFGAddInitializers);
   Opts.TrimGraph = Args.hasArg(OPT_trim_egraph);
   Opts.MaxNodes = Args.getLastArgIntValue(OPT_analyzer_max_nodes, 150000,Diags);
   Opts.MaxLoop = Args.getLastArgIntValue(OPT_analyzer_max_loop, 4, Diags);
@@ -1261,6 +1263,7 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
   Opts.EmitGcovArcs = Args.hasArg(OPT_femit_coverage_data);
   Opts.EmitGcovNotes = Args.hasArg(OPT_femit_coverage_notes);
   Opts.EmitOpenCLArgMetadata = Args.hasArg(OPT_cl_kernel_arg_info);
+  Opts.EmitMicrosoftInlineAsm = Args.hasArg(OPT_fenable_experimental_ms_inline_asm);
   Opts.CoverageFile = Args.getLastArgValue(OPT_coverage_file);
   Opts.DebugCompilationDir = Args.getLastArgValue(OPT_fdebug_compilation_dir);
   Opts.LinkBitcodeFile = Args.getLastArgValue(OPT_mlink_bitcode_file);
@@ -1435,6 +1438,8 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
     switch (A->getOption().getID()) {
     default:
       llvm_unreachable("Invalid option in group!");
+    case OPT_ast_list:
+      Opts.ProgramAction = frontend::ASTDeclList; break;
     case OPT_ast_dump:
       Opts.ProgramAction = frontend::ASTDump; break;
     case OPT_ast_dump_xml:
@@ -1541,6 +1546,7 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
   Opts.FixOnlyWarnings = Args.hasArg(OPT_fix_only_warnings);
   Opts.FixAndRecompile = Args.hasArg(OPT_fixit_recompile);
   Opts.FixToTemporaries = Args.hasArg(OPT_fixit_to_temp);
+  Opts.ASTDumpFilter = Args.getLastArgValue(OPT_ast_dump_filter);
 
   Opts.CodeCompleteOpts.IncludeMacros
     = Args.hasArg(OPT_code_completion_macros);
@@ -2090,9 +2096,10 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
                                  Opts.Deprecated);
 
   // FIXME: Eliminate this dependency.
-  unsigned Opt = getOptimizationLevel(Args, IK, Diags);
+  unsigned Opt = getOptimizationLevel(Args, IK, Diags),
+       OptSize = getOptimizationLevelSize(Args, IK, Diags);
   Opts.Optimize = Opt != 0;
-  Opts.OptimizeSize = getOptimizationLevelSize(Args, IK, Diags);
+  Opts.OptimizeSize = OptSize != 0;
 
   // This is the __NO_INLINE__ define, which just depends on things like the
   // optimization level and -fno-inline, not actually whether the backend has
@@ -2100,6 +2107,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.NoInlineDefine = !Opt || Args.hasArg(OPT_fno_inline);
 
   Opts.FastMath = Args.hasArg(OPT_ffast_math);
+  Opts.FiniteMathOnly = Args.hasArg(OPT_ffinite_math_only);
 
   unsigned SSP = Args.getLastArgIntValue(OPT_stack_protector, 0, Diags);
   switch (SSP) {

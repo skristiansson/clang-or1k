@@ -20,6 +20,7 @@
 #include "clang/AST/StmtIterator.h"
 #include "clang/AST/DeclGroup.h"
 #include "clang/AST/Attr.h"
+#include "clang/Lex/Token.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/raw_ostream.h"
@@ -500,6 +501,14 @@ public:
   decl_iterator decl_end() { return DG.end(); }
   const_decl_iterator decl_begin() const { return DG.begin(); }
   const_decl_iterator decl_end() const { return DG.end(); }
+
+  typedef std::reverse_iterator<decl_iterator> reverse_decl_iterator;
+  reverse_decl_iterator decl_rbegin() {
+    return reverse_decl_iterator(decl_end());
+  }
+  reverse_decl_iterator decl_rend() {
+    return reverse_decl_iterator(decl_begin());
+  }
 };
 
 /// NullStmt - This is the null statement ";": C99 6.8.3p3.
@@ -1617,16 +1626,28 @@ class MSAsmStmt : public Stmt {
   bool IsSimple;
   bool IsVolatile;
 
+  unsigned NumAsmToks;
+  unsigned NumLineEnds;
+
+  Token *AsmToks;
+  unsigned *LineEnds;
   Stmt **Exprs;
 
 public:
-  MSAsmStmt(ASTContext &C, SourceLocation asmloc, std::string &asmstr,
+  MSAsmStmt(ASTContext &C, SourceLocation asmloc, bool issimple,
+            bool isvolatile, ArrayRef<Token> asmtoks,
+            ArrayRef<unsigned> lineends, std::string &asmstr,
             SourceLocation endloc);
 
   SourceLocation getAsmLoc() const { return AsmLoc; }
   void setAsmLoc(SourceLocation L) { AsmLoc = L; }
   SourceLocation getEndLoc() const { return EndLoc; }
   void setEndLoc(SourceLocation L) { EndLoc = L; }
+
+  unsigned getNumAsmToks() { return NumAsmToks; }
+  Token *getAsmToks() { return AsmToks; }
+  unsigned getNumLineEnds() { return NumLineEnds; }
+  unsigned *getLineEnds() { return LineEnds; }
 
   bool isVolatile() const { return IsVolatile; }
   void setVolatile(bool V) { IsVolatile = V; }

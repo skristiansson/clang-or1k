@@ -387,6 +387,9 @@ void CodeGenFunction::GenerateThunk(llvm::Function *Fn,
   if (!ResultType->isVoidType() && Slot.isNull())
     CGM.getCXXABI().EmitReturnFromThunk(*this, RV, ResultType);
 
+  // Disable the final ARC autorelease.
+  AutoreleaseResult = false;
+
   FinishFunction();
 
   // Set the right linkage.
@@ -572,12 +575,11 @@ CodeGenVTables::CreateVTableInitializer(const CXXRecordDecl *RD,
         if (!PureVirtualFn) {
           llvm::FunctionType *Ty = 
             llvm::FunctionType::get(CGM.VoidTy, /*isVarArg=*/false);
-          PureVirtualFn = 
-            CGM.CreateRuntimeFunction(Ty, "__cxa_pure_virtual");
-          PureVirtualFn = llvm::ConstantExpr::getBitCast(PureVirtualFn, 
-                                                         Int8PtrTy);
+          StringRef PureCallName = CGM.getCXXABI().GetPureVirtualCallName();
+          PureVirtualFn = CGM.CreateRuntimeFunction(Ty, PureCallName);
+          PureVirtualFn = llvm::ConstantExpr::getBitCast(PureVirtualFn,
+                                                         CGM.Int8PtrTy);
         }
-        
         Init = PureVirtualFn;
       } else {
         // Check if we should use a thunk.

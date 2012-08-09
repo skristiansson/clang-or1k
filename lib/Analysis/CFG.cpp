@@ -776,13 +776,12 @@ void CFGBuilder::addAutomaticObjDtors(LocalScope::const_iterator B,
     // If this destructor is marked as a no-return destructor, we need to
     // create a new block for the destructor which does not have as a successor
     // anything built thus far: control won't flow out of this block.
-    QualType Ty;
-    if ((*I)->getType()->isReferenceType()) {
+    QualType Ty = (*I)->getType();
+    if (Ty->isReferenceType()) {
       Ty = getReferenceInitTemporaryType(*Context, (*I)->getInit());
-    } else {
-      Ty = Context->getBaseElementType((*I)->getType());
     }
-    
+    Ty = Context->getBaseElementType(Ty);
+
     const CXXDestructorDecl *Dtor = Ty->getAsCXXRecordDecl()->getDestructor();
     if (cast<FunctionType>(Dtor->getType())->getNoReturnAttr())
       Block = createNoReturnBlock();
@@ -1341,7 +1340,7 @@ static bool CanThrow(Expr *E, ASTContext &Ctx) {
   const FunctionType *FT = Ty->getAs<FunctionType>();
   if (FT) {
     if (const FunctionProtoType *Proto = dyn_cast<FunctionProtoType>(FT))
-      if (Proto->getExceptionSpecType() != EST_Uninstantiated &&
+      if (!isUnresolvedExceptionSpec(Proto->getExceptionSpecType()) &&
           Proto->isNothrow(Ctx))
         return false;
   }
@@ -1492,6 +1491,12 @@ CFGBlock *CFGBuilder::VisitConditionalOperator(AbstractConditionalOperator *C,
   if (badCFG)
     return 0;
 
+  // If the condition is a logical '&&' or '||', build a more accurate CFG.
+  if (BinaryOperator *Cond =
+        dyn_cast<BinaryOperator>(C->getCond()->IgnoreParens()))
+    if (Cond->isLogicalOp())
+      return VisitLogicalOperator(Cond, C, LHSBlock, RHSBlock).first;
+
   // Create the block that will contain the condition.
   Block = createBlock(false);
 
@@ -1528,11 +1533,10 @@ CFGBlock *CFGBuilder::VisitDeclStmt(DeclStmt *DS) {
 
   CFGBlock *B = 0;
 
-  // FIXME: Add a reverse iterator for DeclStmt to avoid this extra copy.
-  typedef SmallVector<Decl*,10> BufTy;
-  BufTy Buf(DS->decl_begin(), DS->decl_end());
-
-  for (BufTy::reverse_iterator I = Buf.rbegin(), E = Buf.rend(); I != E; ++I) {
+  // Build an individual DeclStmt for each decl.
+  for (DeclStmt::reverse_decl_iterator I = DS->decl_rbegin(),
+                                       E = DS->decl_rend();
+       I != E; ++I) {
     // Get the alignment of the new DeclStmt, padding out to >=8 bytes.
     unsigned A = llvm::AlignOf<DeclStmt>::Alignment < 8
                ? 8 : llvm::AlignOf<DeclStmt>::Alignment;
@@ -1710,7 +1714,8 @@ CFGBlock *CFGBuilder::VisitIfStmt(IfStmt *I) {
   // control-flow transfer of '&&' or '||' go directly into the then/else
   // blocks directly.
   if (!I->getConditionVariable())
-    if (BinaryOperator *Cond = dyn_cast<BinaryOperator>(I->getCond()))
+    if (BinaryOperator *Cond =
+            dyn_cast<BinaryOperator>(I->getCond()->IgnoreParens()))
       if (Cond->isLogicalOp())
         return VisitLogicalOperator(Cond, I, ThenBlock, ElseBlock).first;
 
@@ -1930,7 +1935,8 @@ CFGBlock *CFGBuilder::VisitForStmt(ForStmt *F) {
 
     // Specially handle logical operators, which have a slightly
     // more optimal CFG representation.
-    if (BinaryOperator *Cond = dyn_cast_or_null<BinaryOperator>(C))
+    if (BinaryOperator *Cond =
+            dyn_cast_or_null<BinaryOperator>(C ? C->IgnoreParens() : 0))
       if (Cond->isLogicalOp()) {
         llvm::tie(EntryConditionBlock, ExitConditionBlock) =
           VisitLogicalOperator(Cond, F, BodyBlock, LoopSuccessor);
@@ -2239,7 +2245,7 @@ CFGBlock *CFGBuilder::VisitWhileStmt(WhileStmt *W) {
 
     // Specially handle logical operators, which have a slightly
     // more optimal CFG representation.
-    if (BinaryOperator *Cond = dyn_cast<BinaryOperator>(C))
+    if (BinaryOperator *Cond = dyn_cast<BinaryOperator>(C->IgnoreParens()))
       if (Cond->isLogicalOp()) {
         llvm::tie(EntryConditionBlock, ExitConditionBlock) =
           VisitLogicalOperator(Cond, W, BodyBlock,
@@ -3714,8 +3720,7 @@ static void print_elem(raw_ostream &OS, StmtPrinterHelper* Helper,
     const Type* T = VD->getType().getTypePtr();
     if (const ReferenceType* RT = T->getAs<ReferenceType>())
       T = RT->getPointeeType().getTypePtr();
-    else if (const Type *ET = T->getArrayElementTypeNoTypeQual())
-      T = ET;
+    T = T->getBaseElementTypeUnsafe();
 
     OS << ".~" << T->getAsCXXRecordDecl()->getName().str() << "()";
     OS << " (Implicit destructor)\n";
@@ -3727,11 +3732,7 @@ static void print_elem(raw_ostream &OS, StmtPrinterHelper* Helper,
 
   } else if (const CFGMemberDtor *ME = E.getAs<CFGMemberDtor>()) {
     const FieldDecl *FD = ME->getFieldDecl();
-
-    const Type *T = FD->getType().getTypePtr();
-    if (const Type *ET = T->getArrayElementTypeNoTypeQual())
-      T = ET;
-
+    const Type *T = FD->getType()->getBaseElementTypeUnsafe();
     OS << "this->" << FD->getName();
     OS << ".~" << T->getAsCXXRecordDecl()->getName() << "()";
     OS << " (Member object destructor)\n";

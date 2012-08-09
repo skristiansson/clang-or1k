@@ -50,6 +50,7 @@ public:
   void visitParagraphComment(const ParagraphComment *C);
   void visitBlockCommandComment(const BlockCommandComment *C);
   void visitParamCommandComment(const ParamCommandComment *C);
+  void visitTParamCommandComment(const TParamCommandComment *C);
   void visitVerbatimBlockComment(const VerbatimBlockComment *C);
   void visitVerbatimBlockLineComment(const VerbatimBlockLineComment *C);
   void visitVerbatimLineComment(const VerbatimLineComment *C);
@@ -75,7 +76,7 @@ void CommentDumper::dumpSourceRange(const Comment *C) {
 void CommentDumper::dumpComment(const Comment *C) {
   dumpIndent();
   OS << "(" << C->getCommentKindName()
-     << " " << (void *) C;
+     << " " << (const void *) C;
   dumpSourceRange(C);
 }
 
@@ -105,6 +106,22 @@ void CommentDumper::visitTextComment(const TextComment *C) {
 
 void CommentDumper::visitInlineCommandComment(const InlineCommandComment *C) {
   dumpComment(C);
+
+  OS << " Name=\"" << C->getCommandName() << "\"";
+  switch (C->getRenderKind()) {
+  case InlineCommandComment::RenderNormal:
+    OS << " RenderNormal";
+    break;
+  case InlineCommandComment::RenderBold:
+    OS << " RenderBold";
+    break;
+  case InlineCommandComment::RenderMonospaced:
+    OS << " RenderMonospaced";
+    break;
+  case InlineCommandComment::RenderEmphasized:
+    OS << " RenderEmphasized";
+    break;
+  }
 
   for (unsigned i = 0, e = C->getNumArgs(); i != e; ++i)
     OS << " Arg[" << i << "]=\"" << C->getArgText(i) << "\"";
@@ -139,6 +156,8 @@ void CommentDumper::visitBlockCommandComment(const BlockCommandComment *C) {
   dumpComment(C);
 
   OS << " Name=\"" << C->getCommandName() << "\"";
+  for (unsigned i = 0, e = C->getNumArgs(); i != e; ++i)
+    OS << " Arg[" << i << "]=\"" << C->getArgText(i) << "\"";
 }
 
 void CommentDumper::visitParamCommandComment(const ParamCommandComment *C) {
@@ -151,8 +170,28 @@ void CommentDumper::visitParamCommandComment(const ParamCommandComment *C) {
   else
     OS << " implicitly";
 
+  if (C->hasParamName())
+    OS << " Param=\"" << C->getParamName() << "\"";
+
+  if (C->isParamIndexValid())
+    OS << " ParamIndex=" << C->getParamIndex();
+}
+
+void CommentDumper::visitTParamCommandComment(const TParamCommandComment *C) {
+  dumpComment(C);
+
   if (C->hasParamName()) {
     OS << " Param=\"" << C->getParamName() << "\"";
+  }
+
+  if (C->isPositionValid()) {
+    OS << " Position=<";
+    for (unsigned i = 0, e = C->getDepth(); i != e; ++i) {
+      OS << C->getIndex(i);
+      if (i != e - 1)
+        OS << ", ";
+    }
+    OS << ">";
   }
 }
 
@@ -181,14 +220,8 @@ void CommentDumper::visitFullComment(const FullComment *C) {
 
 } // unnamed namespace
 
-void Comment::dump() const {
-  CommentDumper D(llvm::errs(), NULL);
-  D.dumpSubtree(this);
-  llvm::errs() << '\n';
-}
-
-void Comment::dump(SourceManager &SM) const {
-  CommentDumper D(llvm::errs(), &SM);
+void Comment::dump(llvm::raw_ostream &OS, SourceManager *SM) const {
+  CommentDumper D(llvm::errs(), SM);
   D.dumpSubtree(this);
   llvm::errs() << '\n';
 }

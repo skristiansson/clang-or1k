@@ -36,6 +36,7 @@ class ASTContext;
 namespace ento {
 
 class CallEvent;
+class CallEventManager;
 
 typedef ConstraintManager* (*ConstraintManagerCreator)(ProgramStateManager&,
                                                        SubEngine&);
@@ -52,6 +53,24 @@ template <typename T> struct ProgramStateTrait {
   static inline void *MakeVoidPtr(data_type D) { return (void*) D; }
   static inline data_type MakeData(void *const* P) {
     return P ? (data_type) *P : (data_type) 0;
+  }
+};
+
+/// \class Stores the dynamic type information.
+/// Information about type of an object at runtime. This is used by dynamic
+/// dispatch implementation.
+class DynamicTypeInfo {
+  QualType T;
+
+public:
+  DynamicTypeInfo() : T(QualType()) {}
+  DynamicTypeInfo(QualType WithType) : T(WithType) {}
+  QualType getType() {return T;}
+  void Profile(llvm::FoldingSetNodeID &ID) const {
+    T.Profile(ID);
+  }
+  bool operator==(const DynamicTypeInfo &X) const {
+    return T == X.T;
   }
 };
 
@@ -238,6 +257,9 @@ public:
   /// Get the lvalue for a field reference.
   SVal getLValue(const FieldDecl *decl, SVal Base) const;
 
+  /// Get the lvalue for an indirect field reference.
+  SVal getLValue(const IndirectFieldDecl *decl, SVal Base) const;
+
   /// Get the lvalue for an array index.
   SVal getLValue(QualType ElementType, SVal Idx, SVal Base) const;
 
@@ -308,6 +330,19 @@ public:
   bool isTainted(SVal V, TaintTagType Kind = TaintTagGeneric) const;
   bool isTainted(SymbolRef Sym, TaintTagType Kind = TaintTagGeneric) const;
   bool isTainted(const MemRegion *Reg, TaintTagType Kind=TaintTagGeneric) const;
+
+  /// \brief Get dynamic type information for a region.
+  DynamicTypeInfo getDynamicTypeInfo(const MemRegion *Reg) const;
+
+  /// \brief Add dynamic type information to the region; return the new state.
+  ProgramStateRef addDynamicTypeInfo(const MemRegion *Reg,
+                                     DynamicTypeInfo NewTy) const;
+
+  /// \brief Add dynamic type information to the region; return the new state.
+  ProgramStateRef addDynamicTypeInfo(const MemRegion *Reg,
+                                     QualType NewTy) const {
+    return addDynamicTypeInfo(Reg, DynamicTypeInfo(NewTy));
+  }
 
   //==---------------------------------------------------------------------==//
   // Accessing the Generic Data Map (GDM).
@@ -411,6 +446,9 @@ private:
   /// Object that manages the data for all created SVals.
   OwningPtr<SValBuilder> svalBuilder;
 
+  /// Manages memory for created CallEvents.
+  OwningPtr<CallEventManager> CallEventMgr;
+
   /// A BumpPtrAllocator to allocate states.
   llvm::BumpPtrAllocator &Alloc;
   
@@ -422,28 +460,7 @@ public:
                  StoreManagerCreator CreateStoreManager,
                  ConstraintManagerCreator CreateConstraintManager,
                  llvm::BumpPtrAllocator& alloc,
-                 SubEngine &subeng)
-    : Eng(&subeng),
-      EnvMgr(alloc),
-      GDMFactory(alloc),
-      svalBuilder(createSimpleSValBuilder(alloc, Ctx, *this)),
-      Alloc(alloc) {
-    StoreMgr.reset((*CreateStoreManager)(*this));
-    ConstraintMgr.reset((*CreateConstraintManager)(*this, subeng));
-  }
-
-  ProgramStateManager(ASTContext &Ctx,
-                 StoreManagerCreator CreateStoreManager,
-                 ConstraintManager* ConstraintManagerPtr,
-                 llvm::BumpPtrAllocator& alloc)
-    : Eng(0),
-      EnvMgr(alloc),
-      GDMFactory(alloc),
-      svalBuilder(createSimpleSValBuilder(alloc, Ctx, *this)),
-      Alloc(alloc) {
-    StoreMgr.reset((*CreateStoreManager)(*this));
-    ConstraintMgr.reset(ConstraintManagerPtr);
-  }
+                 SubEngine &subeng);
 
   ~ProgramStateManager();
 
@@ -478,6 +495,8 @@ public:
   const MemRegionManager& getRegionManager() const {
     return svalBuilder->getRegionManager();
   }
+
+  CallEventManager &getCallEventManager() { return *CallEventMgr; }
 
   StoreManager& getStoreManager() { return *StoreMgr; }
   ConstraintManager& getConstraintManager() { return *ConstraintMgr; }
@@ -649,6 +668,18 @@ inline SVal ProgramState::getLValue(const FieldDecl *D, SVal Base) const {
   return getStateManager().StoreMgr->getLValueField(D, Base);
 }
 
+inline SVal ProgramState::getLValue(const IndirectFieldDecl *D,
+                                    SVal Base) const {
+  StoreManager &SM = *getStateManager().StoreMgr;
+  for (IndirectFieldDecl::chain_iterator I = D->chain_begin(),
+                                         E = D->chain_end();
+       I != E; ++I) {
+    Base = SM.getLValueField(cast<FieldDecl>(*I), Base);
+  }
+
+  return Base;
+}
+
 inline SVal ProgramState::getLValue(QualType ElementType, SVal Idx, SVal Base) const{
   if (NonLoc *N = dyn_cast<NonLoc>(&Idx))
     return getStateManager().StoreMgr->getLValueElement(ElementType, *N, Base);
@@ -764,14 +795,12 @@ CB ProgramState::scanReachableSymbols(const MemRegion * const *beg,
 /// \class ScanReachableSymbols
 /// A Utility class that allows to visit the reachable symbols using a custom
 /// SymbolVisitor.
-class ScanReachableSymbols : public SubRegionMap::Visitor  {
-  virtual void anchor();
+class ScanReachableSymbols {
   typedef llvm::DenseMap<const void*, unsigned> VisitedItems;
 
   VisitedItems visited;
   ProgramStateRef state;
   SymbolVisitor &visitor;
-  OwningPtr<SubRegionMap> SRM;
 public:
 
   ScanReachableSymbols(ProgramStateRef st, SymbolVisitor& v)
@@ -781,11 +810,6 @@ public:
   bool scan(SVal val);
   bool scan(const MemRegion *R);
   bool scan(const SymExpr *sym);
-
-  // From SubRegionMap::Visitor.
-  bool Visit(const MemRegion* Parent, const MemRegion* SubRegion) {
-    return scan(SubRegion);
-  }
 };
 
 } // end GR namespace

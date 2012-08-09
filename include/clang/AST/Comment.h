@@ -15,10 +15,15 @@
 #define LLVM_CLANG_AST_COMMENT_H
 
 #include "clang/Basic/SourceLocation.h"
+#include "clang/AST/Type.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 
 namespace clang {
+class Decl;
+class ParmVarDecl;
+class TemplateParameterList;
+
 namespace comments {
 
 /// Any part of the comment.
@@ -48,17 +53,53 @@ protected:
     /// (There is no separate AST node for a newline.)
     unsigned HasTrailingNewline : 1;
   };
-  enum { NumInlineContentCommentBitfields = 9 };
+  enum { NumInlineContentCommentBits = NumCommentBits + 1 };
+
+  class TextCommentBitfields {
+    friend class TextComment;
+
+    unsigned : NumInlineContentCommentBits;
+
+    /// True if \c IsWhitespace field contains a valid value.
+    mutable unsigned IsWhitespaceValid : 1;
+
+    /// True if this comment AST node contains only whitespace.
+    mutable unsigned IsWhitespace : 1;
+  };
+  enum { NumTextCommentBits = NumInlineContentCommentBits + 2 };
+
+  class InlineCommandCommentBitfields {
+    friend class InlineCommandComment;
+
+    unsigned : NumInlineContentCommentBits;
+
+    unsigned RenderKind : 2;
+  };
+  enum { NumInlineCommandCommentBits = NumInlineContentCommentBits + 1 };
 
   class HTMLStartTagCommentBitfields {
     friend class HTMLStartTagComment;
 
-    unsigned : NumInlineContentCommentBitfields;
+    unsigned : NumInlineContentCommentBits;
 
     /// True if this tag is self-closing (e. g., <br />).  This is based on tag
     /// spelling in comment (plain <br> would not set this flag).
     unsigned IsSelfClosing : 1;
   };
+  enum { NumHTMLStartTagCommentBits = NumInlineContentCommentBits + 1 };
+
+  class ParagraphCommentBitfields {
+    friend class ParagraphComment;
+
+    unsigned : NumCommentBits;
+
+    /// True if \c IsWhitespace field contains a valid value.
+    mutable unsigned IsWhitespaceValid : 1;
+
+    /// True if this comment AST node contains only whitespace.
+    mutable unsigned IsWhitespace : 1;
+  };
+  enum { NumParagraphCommentBits = NumCommentBits + 2 };
 
   class ParamCommandCommentBitfields {
     friend class ParamCommandComment;
@@ -71,12 +112,15 @@ protected:
     /// True if direction was specified explicitly in the comment.
     unsigned IsDirectionExplicit : 1;
   };
-  enum { NumParamCommandCommentBitfields = 11 };
+  enum { NumParamCommandCommentBits = 11 };
 
   union {
     CommentBitfields CommentBits;
     InlineContentCommentBitfields InlineContentCommentBits;
+    TextCommentBitfields TextCommentBits;
+    InlineCommandCommentBitfields InlineCommandCommentBits;
     HTMLStartTagCommentBitfields HTMLStartTagCommentBits;
+    ParagraphCommentBitfields ParagraphCommentBits;
     ParamCommandCommentBitfields ParamCommandCommentBits;
   };
 
@@ -115,6 +159,7 @@ public:
 
   LLVM_ATTRIBUTE_USED void dump() const;
   LLVM_ATTRIBUTE_USED void dump(SourceManager &SM) const;
+  void dump(llvm::raw_ostream &OS, SourceManager *SM) const;
 
   static bool classof(const Comment *) { return true; }
 
@@ -179,8 +224,9 @@ public:
               SourceLocation LocEnd,
               StringRef Text) :
       InlineContentComment(TextCommentKind, LocBegin, LocEnd),
-      Text(Text)
-  { }
+      Text(Text) {
+    TextCommentBits.IsWhitespaceValid = false;
+  }
 
   static bool classof(const Comment *C) {
     return C->getCommentKind() == TextCommentKind;
@@ -194,7 +240,17 @@ public:
 
   StringRef getText() const LLVM_READONLY { return Text; }
 
-  bool isWhitespace() const;
+  bool isWhitespace() const {
+    if (TextCommentBits.IsWhitespaceValid)
+      return TextCommentBits.IsWhitespace;
+
+    TextCommentBits.IsWhitespace = isWhitespaceNoCache();
+    TextCommentBits.IsWhitespaceValid = true;
+    return TextCommentBits.IsWhitespace;
+  }
+
+private:
+  bool isWhitespaceNoCache() const;
 };
 
 /// A command with word-like arguments that is considered inline content.
@@ -205,6 +261,15 @@ public:
     StringRef Text;
 
     Argument(SourceRange Range, StringRef Text) : Range(Range), Text(Text) { }
+  };
+
+  /// The most appropriate rendering mode for this command, chosen on command
+  /// semantics in Doxygen.
+  enum RenderKind {
+    RenderNormal,
+    RenderBold,
+    RenderMonospaced,
+    RenderEmphasized
   };
 
 protected:
@@ -218,10 +283,12 @@ public:
   InlineCommandComment(SourceLocation LocBegin,
                        SourceLocation LocEnd,
                        StringRef Name,
+                       RenderKind RK,
                        llvm::ArrayRef<Argument> Args) :
-    InlineContentComment(InlineCommandCommentKind, LocBegin, LocEnd),
-    Name(Name), Args(Args)
-  { }
+      InlineContentComment(InlineCommandCommentKind, LocBegin, LocEnd),
+      Name(Name), Args(Args) {
+    InlineCommandCommentBits.RenderKind = RK;
+  }
 
   static bool classof(const Comment *C) {
     return C->getCommentKind() == InlineCommandCommentKind;
@@ -240,6 +307,10 @@ public:
   SourceRange getCommandNameRange() const {
     return SourceRange(getLocStart().getLocWithOffset(-1),
                        getLocEnd());
+  }
+
+  RenderKind getRenderKind() const {
+    return static_cast<RenderKind>(InlineCommandCommentBits.RenderKind);
   }
 
   unsigned getNumArgs() const {
@@ -441,8 +512,13 @@ public:
                           SourceLocation(),
                           SourceLocation()),
       Content(Content) {
-    if (Content.empty())
+    if (Content.empty()) {
+      ParagraphCommentBits.IsWhitespace = true;
+      ParagraphCommentBits.IsWhitespaceValid = true;
       return;
+    }
+
+    ParagraphCommentBits.IsWhitespaceValid = false;
 
     setSourceRange(SourceRange(Content.front()->getLocStart(),
                                Content.back()->getLocEnd()));
@@ -463,7 +539,17 @@ public:
     return reinterpret_cast<child_iterator>(Content.end());
   }
 
-  bool isWhitespace() const;
+  bool isWhitespace() const {
+    if (ParagraphCommentBits.IsWhitespaceValid)
+      return ParagraphCommentBits.IsWhitespace;
+
+    ParagraphCommentBits.IsWhitespace = isWhitespaceNoCache();
+    ParagraphCommentBits.IsWhitespaceValid = true;
+    return ParagraphCommentBits.IsWhitespace;
+  }
+
+private:
+  bool isWhitespaceNoCache() const;
 };
 
 /// A command that has zero or more word-like arguments (number of word-like
@@ -558,6 +644,10 @@ public:
     return Paragraph;
   }
 
+  bool hasNonWhitespaceParagraph() const {
+    return Paragraph && !Paragraph->isWhitespace();
+  }
+
   void setParagraph(ParagraphComment *PC) {
     Paragraph = PC;
     SourceLocation NewLocEnd = PC->getLocEnd();
@@ -628,12 +718,75 @@ public:
   }
 
   unsigned getParamIndex() const LLVM_READONLY {
+    assert(isParamIndexValid());
     return ParamIndex;
   }
 
   void setParamIndex(unsigned Index) {
     ParamIndex = Index;
     assert(isParamIndexValid());
+  }
+};
+
+/// Doxygen \\tparam command, describes a template parameter.
+class TParamCommandComment : public BlockCommandComment {
+private:
+  /// If this template parameter name was resolved (found in template parameter
+  /// list), then this stores a list of position indexes in all template
+  /// parameter lists.
+  ///
+  /// For example:
+  /// \verbatim
+  ///     template<typename C, template<typename T> class TT>
+  ///     void test(TT<int> aaa);
+  /// \endverbatim
+  /// For C:  Position = { 0 }
+  /// For TT: Position = { 1 }
+  /// For T:  Position = { 1, 0 }
+  llvm::ArrayRef<unsigned> Position;
+
+public:
+  TParamCommandComment(SourceLocation LocBegin,
+                       SourceLocation LocEnd,
+                       StringRef Name) :
+      BlockCommandComment(TParamCommandCommentKind, LocBegin, LocEnd, Name)
+  { }
+
+  static bool classof(const Comment *C) {
+    return C->getCommentKind() == TParamCommandCommentKind;
+  }
+
+  static bool classof(const TParamCommandComment *) { return true; }
+
+  bool hasParamName() const {
+    return getNumArgs() > 0;
+  }
+
+  StringRef getParamName() const {
+    return Args[0].Text;
+  }
+
+  SourceRange getParamNameRange() const {
+    return Args[0].Range;
+  }
+
+  bool isPositionValid() const LLVM_READONLY {
+    return !Position.empty();
+  }
+
+  unsigned getDepth() const {
+    assert(isPositionValid());
+    return Position.size();
+  }
+
+  unsigned getIndex(unsigned Depth) const {
+    assert(isPositionValid());
+    return Position[Depth];
+  }
+
+  void setPosition(ArrayRef<unsigned> NewPosition) {
+    Position = NewPosition;
+    assert(isPositionValid());
   }
 };
 
@@ -758,14 +911,114 @@ public:
   }
 };
 
+/// Information about the declaration, useful to clients of FullComment.
+struct DeclInfo {
+  /// Declaration the comment is attached to.  Should not be NULL.
+  const Decl *ThisDecl;
+
+  /// Parameters that can be referenced by \\param if \c ThisDecl is something
+  /// that we consider a "function".
+  ArrayRef<const ParmVarDecl *> ParamVars;
+
+  /// Function result type if \c ThisDecl is something that we consider
+  /// a "function".
+  QualType ResultType;
+
+  /// Template parameters that can be referenced by \\tparam if \c ThisDecl is
+  /// a template (\c IsTemplateDecl or \c IsTemplatePartialSpecialization is
+  /// true).
+  const TemplateParameterList *TemplateParameters;
+
+  /// A simplified description of \c ThisDecl kind that should be good enough
+  /// for documentation rendering purposes.
+  enum DeclKind {
+    /// Everything else not explicitly mentioned below.
+    OtherKind,
+
+    /// Something that we consider a "function":
+    /// \li function,
+    /// \li function template,
+    /// \li function template specialization,
+    /// \li member function,
+    /// \li member function template,
+    /// \li member function template specialization,
+    /// \li ObjC method.
+    FunctionKind,
+
+    /// Something that we consider a "class":
+    /// \li class/struct,
+    /// \li class template,
+    /// \li class template (partial) specialization.
+    ClassKind,
+
+    /// Something that we consider a "variable":
+    /// \li namespace scope variables;
+    /// \li static and non-static class data members;
+    /// \li enumerators.
+    VariableKind,
+
+    /// A C++ namespace.
+    NamespaceKind,
+
+    /// A C++ typedef-name (a 'typedef' decl specifier or alias-declaration),
+    /// see \c TypedefNameDecl.
+    TypedefKind,
+
+    /// An enumeration or scoped enumeration.
+    EnumKind
+  };
+
+  /// What kind of template specialization \c ThisDecl is.
+  enum TemplateDeclKind {
+    NotTemplate,
+    Template,
+    TemplateSpecialization,
+    TemplatePartialSpecialization
+  };
+
+  /// If false, only \c ThisDecl is valid.
+  unsigned IsFilled : 1;
+
+  /// Simplified kind of \c ThisDecl, see\c DeclKind enum.
+  unsigned Kind : 3;
+
+  /// Is \c ThisDecl a template declaration.
+  unsigned TemplateKind : 2;
+
+  /// Is \c ThisDecl an ObjCMethodDecl.
+  unsigned IsObjCMethod : 1;
+
+  /// Is \c ThisDecl a non-static member function of C++ class or
+  /// instance method of ObjC class.
+  /// Can be true only if \c IsFunctionDecl is true.
+  unsigned IsInstanceMethod : 1;
+
+  /// Is \c ThisDecl a static member function of C++ class or
+  /// class method of ObjC class.
+  /// Can be true only if \c IsFunctionDecl is true.
+  unsigned IsClassMethod : 1;
+
+  void fill();
+
+  DeclKind getKind() const LLVM_READONLY {
+    return static_cast<DeclKind>(Kind);
+  }
+
+  TemplateDeclKind getTemplateKind() const LLVM_READONLY {
+    return static_cast<TemplateDeclKind>(TemplateKind);
+  }
+};
+
 /// A full comment attached to a declaration, contains block content.
 class FullComment : public Comment {
   llvm::ArrayRef<BlockContentComment *> Blocks;
 
+  DeclInfo *ThisDeclInfo;
+
 public:
-  FullComment(llvm::ArrayRef<BlockContentComment *> Blocks) :
+  FullComment(llvm::ArrayRef<BlockContentComment *> Blocks, DeclInfo *D) :
       Comment(FullCommentKind, SourceLocation(), SourceLocation()),
-      Blocks(Blocks) {
+      Blocks(Blocks), ThisDeclInfo(D) {
     if (Blocks.empty())
       return;
 
@@ -786,6 +1039,16 @@ public:
 
   child_iterator child_end() const {
     return reinterpret_cast<child_iterator>(Blocks.end());
+  }
+
+  const Decl *getDecl() const LLVM_READONLY {
+    return ThisDeclInfo->ThisDecl;
+  }
+
+  const DeclInfo *getDeclInfo() const LLVM_READONLY {
+    if (!ThisDeclInfo->IsFilled)
+      ThisDeclInfo->fill();
+    return ThisDeclInfo;
   }
 };
 

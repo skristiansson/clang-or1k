@@ -8,7 +8,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/Comment.h"
+#include "clang/AST/Decl.h"
+#include "clang/AST/DeclObjC.h"
+#include "clang/AST/DeclTemplate.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace clang {
 namespace comments {
@@ -25,6 +29,19 @@ const char *Comment::getCommentKindName() const {
 #undef ABSTRACT_COMMENT
   }
   llvm_unreachable("Unknown comment kind!");
+}
+
+void Comment::dump() const {
+  // It is important that Comment::dump() is defined in a different TU than
+  // Comment::dump(raw_ostream, SourceManager).  If both functions were defined
+  // in CommentDumper.cpp, that object file would be removed by linker because
+  // none of its functions are referenced by other object files, despite the
+  // LLVM_ATTRIBUTE_USED.
+  dump(llvm::errs(), NULL);
+}
+
+void Comment::dump(SourceManager &SM) const {
+  dump(llvm::errs(), &SM);
 }
 
 namespace {
@@ -86,7 +103,7 @@ Comment::child_iterator Comment::child_end() const {
   llvm_unreachable("Unknown comment kind!");
 }
 
-bool TextComment::isWhitespace() const {
+bool TextComment::isWhitespaceNoCache() const {
   for (StringRef::const_iterator I = Text.begin(), E = Text.end();
        I != E; ++I) {
     const char C = *I;
@@ -97,12 +114,13 @@ bool TextComment::isWhitespace() const {
   return true;
 }
 
-bool ParagraphComment::isWhitespace() const {
+bool ParagraphComment::isWhitespaceNoCache() const {
   for (child_iterator I = child_begin(), E = child_end(); I != E; ++I) {
     if (const TextComment *TC = dyn_cast<TextComment>(*I)) {
       if (!TC->isWhitespace())
         return false;
-    }
+    } else
+      return false;
   }
   return true;
 }
@@ -119,5 +137,128 @@ const char *ParamCommandComment::getDirectionAsString(PassDirection D) {
   llvm_unreachable("unknown PassDirection");
 }
 
+void DeclInfo::fill() {
+  assert(!IsFilled);
+
+  // Set defaults.
+  Kind = OtherKind;
+  TemplateKind = NotTemplate;
+  IsObjCMethod = false;
+  IsInstanceMethod = false;
+  IsClassMethod = false;
+  ParamVars = ArrayRef<const ParmVarDecl *>();
+  TemplateParameters = NULL;
+
+  if (!ThisDecl) {
+    // If there is no declaration, the defaults is our only guess.
+    IsFilled = true;
+    return;
+  }
+
+  Decl::Kind K = ThisDecl->getKind();
+  switch (K) {
+  default:
+    // Defaults are should be good for declarations we don't handle explicitly.
+    break;
+  case Decl::Function:
+  case Decl::CXXMethod:
+  case Decl::CXXConstructor:
+  case Decl::CXXDestructor:
+  case Decl::CXXConversion: {
+    const FunctionDecl *FD = cast<FunctionDecl>(ThisDecl);
+    Kind = FunctionKind;
+    ParamVars = ArrayRef<const ParmVarDecl *>(FD->param_begin(),
+                                              FD->getNumParams());
+    ResultType = FD->getResultType();
+    unsigned NumLists = FD->getNumTemplateParameterLists();
+    if (NumLists != 0) {
+      TemplateKind = TemplateSpecialization;
+      TemplateParameters =
+          FD->getTemplateParameterList(NumLists - 1);
+    }
+
+    if (K == Decl::CXXMethod || K == Decl::CXXConstructor ||
+        K == Decl::CXXDestructor || K == Decl::CXXConversion) {
+      const CXXMethodDecl *MD = cast<CXXMethodDecl>(ThisDecl);
+      IsInstanceMethod = MD->isInstance();
+      IsClassMethod = !IsInstanceMethod;
+    }
+    break;
+  }
+  case Decl::ObjCMethod: {
+    const ObjCMethodDecl *MD = cast<ObjCMethodDecl>(ThisDecl);
+    Kind = FunctionKind;
+    ParamVars = ArrayRef<const ParmVarDecl *>(MD->param_begin(),
+                                              MD->param_size());
+    ResultType = MD->getResultType();
+    IsObjCMethod = true;
+    IsInstanceMethod = MD->isInstanceMethod();
+    IsClassMethod = !IsInstanceMethod;
+    break;
+  }
+  case Decl::FunctionTemplate: {
+    const FunctionTemplateDecl *FTD = cast<FunctionTemplateDecl>(ThisDecl);
+    Kind = FunctionKind;
+    TemplateKind = Template;
+    const FunctionDecl *FD = FTD->getTemplatedDecl();
+    ParamVars = ArrayRef<const ParmVarDecl *>(FD->param_begin(),
+                                              FD->getNumParams());
+    ResultType = FD->getResultType();
+    TemplateParameters = FTD->getTemplateParameters();
+    break;
+  }
+  case Decl::ClassTemplate: {
+    const ClassTemplateDecl *CTD = cast<ClassTemplateDecl>(ThisDecl);
+    Kind = ClassKind;
+    TemplateKind = Template;
+    TemplateParameters = CTD->getTemplateParameters();
+    break;
+  }
+  case Decl::ClassTemplatePartialSpecialization: {
+    const ClassTemplatePartialSpecializationDecl *CTPSD =
+        cast<ClassTemplatePartialSpecializationDecl>(ThisDecl);
+    Kind = ClassKind;
+    TemplateKind = TemplatePartialSpecialization;
+    TemplateParameters = CTPSD->getTemplateParameters();
+    break;
+  }
+  case Decl::ClassTemplateSpecialization:
+    Kind = ClassKind;
+    TemplateKind = TemplateSpecialization;
+    break;
+  case Decl::Record:
+  case Decl::CXXRecord:
+    Kind = ClassKind;
+    break;
+  case Decl::Var:
+  case Decl::Field:
+  case Decl::EnumConstant:
+  case Decl::ObjCIvar:
+  case Decl::ObjCAtDefsField:
+    Kind = VariableKind;
+    break;
+  case Decl::Namespace:
+    Kind = NamespaceKind;
+    break;
+  case Decl::Typedef:
+  case Decl::TypeAlias:
+    Kind = TypedefKind;
+    break;
+  case Decl::TypeAliasTemplate: {
+    const TypeAliasTemplateDecl *TAT = cast<TypeAliasTemplateDecl>(ThisDecl);
+    Kind = TypedefKind;
+    TemplateKind = Template;
+    TemplateParameters = TAT->getTemplateParameters();
+    break;
+  }
+  case Decl::Enum:
+    Kind = EnumKind;
+    break;
+  }
+
+  IsFilled = true;
+}
+
 } // end namespace comments
 } // end namespace clang
+

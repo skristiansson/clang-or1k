@@ -517,7 +517,7 @@ static LinkageInfo getLVForClassMember(const NamedDecl *D, bool OnlyTemplate) {
 
   // If this class member has an explicit visibility attribute, the only
   // thing that can change its visibility is the template arguments, so
-  // only look for them when processing the the class.
+  // only look for them when processing the class.
   bool ClassOnlyTemplate =  LV.visibilityExplicit() ? true : OnlyTemplate;
 
   // If this member has an visibility attribute, ClassF will exclude
@@ -709,6 +709,10 @@ llvm::Optional<Visibility> NamedDecl::getExplicitVisibility() const {
   // Otherwise, just check the declaration itself first.
   if (llvm::Optional<Visibility> V = getVisibilityOf(this))
     return V;
+
+  // The visibility of a template is stored in the templated decl.
+  if (const TemplateDecl *TD = dyn_cast<TemplateDecl>(this))
+    return getVisibilityOf(TD->getTemplatedDecl());
 
   // If there wasn't explicit visibility there, and this is a
   // specialization of a class template, check for visibility

@@ -174,8 +174,10 @@ static bool isObjCAutoRefCount(const ArgList &Args) {
 
 /// \brief Determine whether we are linking the ObjC runtime.
 static bool isObjCRuntimeLinked(const ArgList &Args) {
-  if (isObjCAutoRefCount(Args))
+  if (isObjCAutoRefCount(Args)) {
+    Args.ClaimAllArgs(options::OPT_fobjc_link_runtime);
     return true;
+  }
   return Args.hasArg(options::OPT_fobjc_link_runtime);
 }
 
@@ -629,16 +631,11 @@ static StringRef getARMFloatABI(const Driver &D,
       break;
     }
 
-    case llvm::Triple::Linux: {
-      if (Triple.getEnvironment() == llvm::Triple::GNUEABI) {
-        FloatABI = "softfp";
-        break;
-      }
-    }
-    // fall through
-
     default:
       switch(Triple.getEnvironment()) {
+      case llvm::Triple::GNUEABIHF:
+        FloatABI = "hard";
+        break;
       case llvm::Triple::GNUEABI:
         FloatABI = "softfp";
         break;
@@ -685,6 +682,7 @@ void Clang::AddARMTargetArgs(const ArgList &Args,
     switch(Triple.getEnvironment()) {
     case llvm::Triple::ANDROIDEABI:
     case llvm::Triple::GNUEABI:
+    case llvm::Triple::GNUEABIHF:
       ABIName = "aapcs-linux";
       break;
     case llvm::Triple::EABI:
@@ -1189,6 +1187,11 @@ void Clang::AddX86TargetArgs(const ArgList &Args,
         CPUName = "x86-64";
       else if (getToolChain().getArch() == llvm::Triple::x86)
         CPUName = "i486";
+    } else if (getToolChain().getOS().startswith("bitrig"))  {
+      if (getToolChain().getArch() == llvm::Triple::x86_64)
+        CPUName = "x86-64";
+      else if (getToolChain().getArch() == llvm::Triple::x86)
+        CPUName = "i686";
     } else if (getToolChain().getOS().startswith("freebsd"))  {
       if (getToolChain().getArch() == llvm::Triple::x86_64)
         CPUName = "x86-64";
@@ -1625,7 +1628,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     // Use PCH if the user requested it.
     bool UsePCH = D.CCCUsePCH;
 
-    if (UsePCH)
+    if (JA.getType() == types::TY_Nothing)
+      CmdArgs.push_back("-fsyntax-only");
+    else if (UsePCH)
       CmdArgs.push_back("-emit-pch");
     else
       CmdArgs.push_back("-emit-pth");
@@ -1911,12 +1916,15 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     }
   }
 
-  // We separately look for the '-ffast-math' flag, and if we find it, tell the
-  // frontend to provide the appropriate preprocessor macros. This is distinct
-  // from enabling any optimizations as it induces a language change which must
-  // survive serialization and deserialization, etc.
+  // We separately look for the '-ffast-math' and '-ffinite-math-only' flags,
+  // and if we find them, tell the frontend to provide the appropriate
+  // preprocessor macros. This is distinct from enabling any optimizations as
+  // these options induce language changes which must survive serialization
+  // and deserialization, etc.
   if (Args.hasArg(options::OPT_ffast_math))
     CmdArgs.push_back("-ffast-math");
+  if (Args.hasArg(options::OPT_ffinite_math_only))
+    CmdArgs.push_back("-ffinite-math-only");
 
   // Decide whether to use verbose asm. Verbose assembly is the default on
   // toolchains which have the integrated assembler on by default.
@@ -2544,6 +2552,10 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (Args.hasFlag(options::OPT_fms_extensions, options::OPT_fno_ms_extensions,
                    getToolChain().getTriple().getOS() == llvm::Triple::Win32))
     CmdArgs.push_back("-fms-extensions");
+
+  // -fms-inline-asm.
+  if (Args.hasArg(options::OPT_fenable_experimental_ms_inline_asm))
+    CmdArgs.push_back("-fenable-experimental-ms-inline-asm");
 
   // -fms-compatibility=0 is default.
   if (Args.hasFlag(options::OPT_fms_compatibility, 
@@ -5043,6 +5055,138 @@ void openbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
   C.addCommand(new Command(JA, *this, Exec, CmdArgs));
 }
 
+void bitrig::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
+                                    const InputInfo &Output,
+                                    const InputInfoList &Inputs,
+                                    const ArgList &Args,
+                                    const char *LinkingOutput) const {
+  ArgStringList CmdArgs;
+
+  Args.AddAllArgValues(CmdArgs, options::OPT_Wa_COMMA,
+                       options::OPT_Xassembler);
+
+  CmdArgs.push_back("-o");
+  CmdArgs.push_back(Output.getFilename());
+
+  for (InputInfoList::const_iterator
+         it = Inputs.begin(), ie = Inputs.end(); it != ie; ++it) {
+    const InputInfo &II = *it;
+    CmdArgs.push_back(II.getFilename());
+  }
+
+  const char *Exec =
+    Args.MakeArgString(getToolChain().GetProgramPath("as"));
+  C.addCommand(new Command(JA, *this, Exec, CmdArgs));
+}
+
+void bitrig::Link::ConstructJob(Compilation &C, const JobAction &JA,
+                                const InputInfo &Output,
+                                const InputInfoList &Inputs,
+                                const ArgList &Args,
+                                const char *LinkingOutput) const {
+  const Driver &D = getToolChain().getDriver();
+  ArgStringList CmdArgs;
+
+  if ((!Args.hasArg(options::OPT_nostdlib)) &&
+      (!Args.hasArg(options::OPT_shared))) {
+    CmdArgs.push_back("-e");
+    CmdArgs.push_back("__start");
+  }
+
+  if (Args.hasArg(options::OPT_static)) {
+    CmdArgs.push_back("-Bstatic");
+  } else {
+    if (Args.hasArg(options::OPT_rdynamic))
+      CmdArgs.push_back("-export-dynamic");
+    CmdArgs.push_back("--eh-frame-hdr");
+    CmdArgs.push_back("-Bdynamic");
+    if (Args.hasArg(options::OPT_shared)) {
+      CmdArgs.push_back("-shared");
+    } else {
+      CmdArgs.push_back("-dynamic-linker");
+      CmdArgs.push_back("/usr/libexec/ld.so");
+    }
+  }
+
+  if (Output.isFilename()) {
+    CmdArgs.push_back("-o");
+    CmdArgs.push_back(Output.getFilename());
+  } else {
+    assert(Output.isNothing() && "Invalid output.");
+  }
+
+  if (!Args.hasArg(options::OPT_nostdlib) &&
+      !Args.hasArg(options::OPT_nostartfiles)) {
+    if (!Args.hasArg(options::OPT_shared)) {
+      if (Args.hasArg(options::OPT_pg))
+        CmdArgs.push_back(Args.MakeArgString(
+                                getToolChain().GetFilePath("gcrt0.o")));
+      else
+        CmdArgs.push_back(Args.MakeArgString(
+                                getToolChain().GetFilePath("crt0.o")));
+      CmdArgs.push_back(Args.MakeArgString(
+                              getToolChain().GetFilePath("crtbegin.o")));
+    } else {
+      CmdArgs.push_back(Args.MakeArgString(
+                              getToolChain().GetFilePath("crtbeginS.o")));
+    }
+  }
+
+  Args.AddAllArgs(CmdArgs, options::OPT_L);
+  Args.AddAllArgs(CmdArgs, options::OPT_T_Group);
+  Args.AddAllArgs(CmdArgs, options::OPT_e);
+
+  AddLinkerInputs(getToolChain(), Inputs, Args, CmdArgs);
+
+  if (!Args.hasArg(options::OPT_nostdlib) &&
+      !Args.hasArg(options::OPT_nodefaultlibs)) {
+    if (D.CCCIsCXX) {
+      getToolChain().AddCXXStdlibLibArgs(Args, CmdArgs);
+      if (Args.hasArg(options::OPT_pg))
+        CmdArgs.push_back("-lm_p");
+      else
+        CmdArgs.push_back("-lm");
+    }
+
+    if (Args.hasArg(options::OPT_pthread))
+      CmdArgs.push_back("-lpthread");
+    if (!Args.hasArg(options::OPT_shared)) {
+      if (Args.hasArg(options::OPT_pg))
+        CmdArgs.push_back("-lc_p");
+      else
+        CmdArgs.push_back("-lc");
+    }
+
+    std::string myarch = "-lclang_rt.";
+    const llvm::Triple &T = getToolChain().getTriple();
+    llvm::Triple::ArchType Arch = T.getArch();
+    switch (Arch) {
+          case llvm::Triple::arm:
+            myarch += ("arm");
+            break;
+          case llvm::Triple::x86:
+            myarch += ("i386");
+            break;
+          case llvm::Triple::x86_64:
+            myarch += ("amd64");
+            break;
+          default:
+            assert(0 && "Unsupported architecture");
+     }
+     CmdArgs.push_back(Args.MakeArgString(myarch));
+  }
+
+  if (!Args.hasArg(options::OPT_nostdlib) &&
+      !Args.hasArg(options::OPT_nostartfiles)) {
+    if (!Args.hasArg(options::OPT_shared))
+      CmdArgs.push_back(Args.MakeArgString(
+                              getToolChain().GetFilePath("crtend.o")));
+    else
+      CmdArgs.push_back(Args.MakeArgString(
+                              getToolChain().GetFilePath("crtendS.o")));
+  }
+}
+
 void or1klinux::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
                                        const InputInfo &Output,
                                        const InputInfoList &Inputs,
@@ -5156,8 +5300,14 @@ void freebsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                  const char *LinkingOutput) const {
   const Driver &D = getToolChain().getDriver();
   ArgStringList CmdArgs;
-  CmdArgs.push_back("--hash-style=both");
-  CmdArgs.push_back("--enable-new-dtags");
+
+  // Silence warning for "clang -g foo.o -o foo"
+  Args.ClaimAllArgs(options::OPT_g_Group);
+  // and "clang -emit-llvm foo.o -o foo"
+  Args.ClaimAllArgs(options::OPT_emit_llvm);
+  // and for "clang -w foo.o -o foo". Other warning options are already
+  // handled somewhere else.
+  Args.ClaimAllArgs(options::OPT_w);
 
   if (!D.SysRoot.empty())
     CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
@@ -5174,6 +5324,14 @@ void freebsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
       CmdArgs.push_back("-dynamic-linker");
       CmdArgs.push_back("/libexec/ld-elf.so.1");
     }
+    if (getToolChain().getTriple().getOSMajorVersion() >= 9) {
+      llvm::Triple::ArchType Arch = getToolChain().getArch();
+      if (Arch == llvm::Triple::arm || Arch == llvm::Triple::sparc ||
+          Arch == llvm::Triple::x86 || Arch == llvm::Triple::x86_64) {
+        CmdArgs.push_back("--hash-style=both");
+      }
+    }
+    CmdArgs.push_back("--enable-new-dtags");
   }
 
   // When building 32-bit code on FreeBSD/amd64, we have to explicitly
@@ -5585,7 +5743,7 @@ void linuxtools::Link::ConstructJob(Compilation &C, const JobAction &JA,
   Args.ClaimAllArgs(options::OPT_g_Group);
   // and "clang -emit-llvm foo.o -o foo"
   Args.ClaimAllArgs(options::OPT_emit_llvm);
-  // and for "clang -g foo.o -o foo". Other warning options are already
+  // and for "clang -w foo.o -o foo". Other warning options are already
   // handled somewhere else.
   Args.ClaimAllArgs(options::OPT_w);
 
@@ -5655,8 +5813,12 @@ void linuxtools::Link::ConstructJob(Compilation &C, const JobAction &JA,
     else if (ToolChain.getArch() == llvm::Triple::x86)
       CmdArgs.push_back("/lib/ld-linux.so.2");
     else if (ToolChain.getArch() == llvm::Triple::arm ||
-             ToolChain.getArch() == llvm::Triple::thumb)
-      CmdArgs.push_back("/lib/ld-linux.so.3");
+             ToolChain.getArch() == llvm::Triple::thumb) {
+      if (ToolChain.getTriple().getEnvironment() == llvm::Triple::GNUEABIHF)
+        CmdArgs.push_back("/lib/ld-linux-armhf.so.3");
+      else
+        CmdArgs.push_back("/lib/ld-linux.so.3");
+    }
     else if (ToolChain.getArch() == llvm::Triple::mips ||
              ToolChain.getArch() == llvm::Triple::mipsel)
       CmdArgs.push_back("/lib/ld.so.1");

@@ -33,6 +33,7 @@ def StringConversion : DiagGroup<"string-conversion">;
 def SignConversion : DiagGroup<"sign-conversion">;
 def BoolConversion : DiagGroup<"bool-conversion">;
 def IntConversion : DiagGroup<"int-conversion">;
+def NonLiteralNullConversion : DiagGroup<"non-literal-null-conversion">;
 def NullConversion : DiagGroup<"null-conversion">;
 def BuiltinRequiresHeader : DiagGroup<"builtin-requires-header">;
 def CXXCompat: DiagGroup<"c++-compat">;
@@ -62,6 +63,8 @@ def DocumentationPedantic : DiagGroup<"documentation-pedantic">;
 def Documentation : DiagGroup<"documentation", [DocumentationHTML]>;
 def EmptyBody : DiagGroup<"empty-body">;
 def ExtraTokens : DiagGroup<"extra-tokens">;
+def CXX11ExtraSemi : DiagGroup<"c++11-extra-semi">;
+def ExtraSemi : DiagGroup<"extra-semi", [CXX11ExtraSemi]>;
 
 def FormatExtraArgs : DiagGroup<"format-extra-args">;
 def FormatZeroLength : DiagGroup<"format-zero-length">;
@@ -312,7 +315,8 @@ def Conversion : DiagGroup<"conversion",
                             StringConversion,
                             SignConversion,
                             BoolConversion,
-                            NullConversion,
+                            NullConversion, // NULL->non-pointer
+                            NonLiteralNullConversion, // (1-1)->pointer (etc)
                             IntConversion]>,
                  DiagCategory<"Value Conversion Issue">;
 
@@ -404,7 +408,7 @@ def NonGCC : DiagGroup<"non-gcc",
 
 // A warning group for warnings about using C++11 features as extensions in
 // earlier C++ versions.
-def CXX11 : DiagGroup<"c++11-extensions">;
+def CXX11 : DiagGroup<"c++11-extensions", [CXX11ExtraSemi]>;
 def : DiagGroup<"c++0x-extensions", [CXX11]>;
 def DelegatingCtorCycles :
   DiagGroup<"delegating-ctor-cycles">;
@@ -435,4 +439,9 @@ def ObjCRedundantAPIUse : DiagGroup<"objc-redundant-api-use", [
 
 def ObjCCocoaAPI : DiagGroup<"objc-cocoa-api", [
     ObjCRedundantAPIUse
+  ]>;
+
+def ObjCStringComparison : DiagGroup<"objc-string-compare">;
+def ObjCLiteralComparison : DiagGroup<"objc-literal-compare", [
+    ObjCStringComparison
   ]>;

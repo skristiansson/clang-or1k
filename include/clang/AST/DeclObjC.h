@@ -939,8 +939,13 @@ public:
   }
   ObjCInterfaceDecl *lookupInheritedClass(const IdentifierInfo *ICName);
 
-  // Lookup a method in the classes implementation hierarchy.
-  ObjCMethodDecl *lookupPrivateMethod(const Selector &Sel, bool Instance=true);
+  /// \brief Lookup a method in the classes implementation hierarchy.
+  ObjCMethodDecl *lookupPrivateMethod(const Selector &Sel,
+                                      bool Instance=true) const;
+
+  ObjCMethodDecl *lookupPrivateClassMethod(const Selector &Sel) {
+    return lookupPrivateMethod(Sel, false);
+  }
 
   SourceLocation getEndOfDefinitionLoc() const { 
     if (!hasDefinition())
@@ -1311,9 +1316,6 @@ class ObjCCategoryDecl : public ObjCContainerDecl {
   /// FIXME: this should not be a singly-linked list.  Move storage elsewhere.
   ObjCCategoryDecl *NextClassCategory;
 
-  /// true of class extension has at least one bitfield ivar.
-  bool HasSynthBitfield : 1;
-
   /// \brief The location of the category name in this declaration.
   SourceLocation CategoryNameLoc;
 
@@ -1327,7 +1329,7 @@ class ObjCCategoryDecl : public ObjCContainerDecl {
                    SourceLocation IvarLBraceLoc=SourceLocation(),
                    SourceLocation IvarRBraceLoc=SourceLocation())
     : ObjCContainerDecl(ObjCCategory, DC, Id, ClassNameLoc, AtLoc),
-      ClassInterface(IDecl), NextClassCategory(0), HasSynthBitfield(false),
+      ClassInterface(IDecl), NextClassCategory(0),
       CategoryNameLoc(CategoryNameLoc),
       IvarLBraceLoc(IvarLBraceLoc), IvarRBraceLoc(IvarRBraceLoc) {
   }
@@ -1376,9 +1378,6 @@ public:
 
   bool IsClassExtension() const { return getIdentifier() == 0; }
   const ObjCCategoryDecl *getNextClassExtension() const;
-
-  bool hasSynthBitfield() const { return HasSynthBitfield; }
-  void setHasSynthBitfield (bool val) { HasSynthBitfield = val; }
 
   typedef specific_decl_iterator<ObjCIvarDecl> ivar_iterator;
   ivar_iterator ivar_begin() const {
@@ -1525,15 +1524,6 @@ public:
     return Id ? Id->getNameStart() : "";
   }
 
-  /// getNameAsCString - Get the name of identifier for the class
-  /// interface associated with this implementation as a C string
-  /// (const char*).
-  //
-  // FIXME: Deprecated, move clients to getName().
-  const char *getNameAsCString() const {
-    return Id ? Id->getNameStart() : "";
-  }
-
   /// @brief Get the name of the class associated with this interface.
   //
   // FIXME: Deprecated, move clients to getName().
@@ -1581,9 +1571,6 @@ class ObjCImplementationDecl : public ObjCImplDecl {
   /// true if class has a .cxx_[construct,destruct] method.
   bool HasCXXStructors : 1;
 
-  /// true if class extension has at least one bitfield ivar.
-  bool HasSynthBitfield : 1;
-
   ObjCImplementationDecl(DeclContext *DC,
                          ObjCInterfaceDecl *classInterface,
                          ObjCInterfaceDecl *superDecl,
@@ -1594,7 +1581,7 @@ class ObjCImplementationDecl : public ObjCImplDecl {
        SuperClass(superDecl), IvarLBraceLoc(IvarLBraceLoc), 
        IvarRBraceLoc(IvarRBraceLoc),
        IvarInitializers(0), NumIvarInitializers(0),
-       HasCXXStructors(false), HasSynthBitfield(false){}
+       HasCXXStructors(false) {}
 public:
   static ObjCImplementationDecl *Create(ASTContext &C, DeclContext *DC,
                                         ObjCInterfaceDecl *classInterface,
@@ -1641,9 +1628,6 @@ public:
   bool hasCXXStructors() const { return HasCXXStructors; }
   void setHasCXXStructors(bool val) { HasCXXStructors = val; }
 
-  bool hasSynthBitfield() const { return HasSynthBitfield; }
-  void setHasSynthBitfield (bool val) { HasSynthBitfield = val; }
-
   /// getIdentifier - Get the identifier that names the class
   /// interface associated with this implementation.
   IdentifierInfo *getIdentifier() const {
@@ -1658,15 +1642,6 @@ public:
   StringRef getName() const {
     assert(getIdentifier() && "Name is not a simple identifier");
     return getIdentifier()->getName();
-  }
-
-  /// getNameAsCString - Get the name of identifier for the class
-  /// interface associated with this implementation as a C string
-  /// (const char*).
-  //
-  // FIXME: Move to StringRef API.
-  const char *getNameAsCString() const {
-    return getName().data();
   }
 
   /// @brief Get the name of the class associated with this interface.
