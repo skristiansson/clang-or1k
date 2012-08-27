@@ -2577,17 +2577,8 @@ private:
            E = CallArgTypeInfo->arg_type_end(); I != E; ++I, ++Arg) {
         assert(Arg != ArgEnd && "Running over edge of argument list!");
         QualType ArgType = *I;
-
-        const RecordType *UT = ArgType->getAsUnionType();
-        if (UT && UT->getDecl()->hasAttr<TransparentUnionAttr>())
-          ArgType = UT->getDecl()->field_begin()->getType();
-
 #ifndef NDEBUG
         QualType ActualArgType = Arg->getType();
-
-        UT = ActualArgType->getAsUnionType();
-        if (UT && UT->getDecl()->hasAttr<TransparentUnionAttr>())
-          ActualArgType = UT->getDecl()->field_begin()->getType();
 
         if (ArgType->isPointerType() && ActualArgType->isPointerType()) {
           QualType ActualBaseType =

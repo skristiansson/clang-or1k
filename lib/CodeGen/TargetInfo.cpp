@@ -727,6 +727,7 @@ X86_32ABIInfo::Class X86_32ABIInfo::classify(QualType Ty) const {
 ABIArgInfo
 X86_32ABIInfo::classifyArgumentTypeWithReg(QualType Ty,
                                            unsigned &FreeRegs) const {
+  Ty = getFirstFieldInTransparentUnion(Ty);
   // Common case first.
   if (FreeRegs == 0)
     return classifyArgumentType(Ty);
@@ -763,7 +764,6 @@ X86_32ABIInfo::classifyArgumentTypeWithReg(QualType Ty,
 }
 
 ABIArgInfo X86_32ABIInfo::classifyArgumentType(QualType Ty) const {
-  Ty = getFirstFieldInTransparentUnion(Ty);
   // FIXME: Set alignment on indirect arguments.
   if (isAggregateTypeForABI(Ty)) {
     // Structures with flexible arrays are always indirect.

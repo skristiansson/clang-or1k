@@ -280,10 +280,6 @@ static llvm::Type *getTypeForFormat(llvm::LLVMContext &VMContext,
 
 /// ConvertType - Convert the specified type to its LLVM form.
 llvm::Type *CodeGenTypes::ConvertType(QualType T) {
-  const RecordType *UT = T->getAsUnionType();
-  if (UT && UT->getDecl()->hasAttr<TransparentUnionAttr>())
-    T = UT->getDecl()->field_begin()->getType();
-
   T = Context.getCanonicalType(T);
 
   const Type *Ty = T.getTypePtr();
