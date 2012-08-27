@@ -5229,6 +5229,11 @@ void or1klinux::Link::ConstructJob(Compilation &C, const JobAction &JA,
   if (!D.SysRoot.empty())
     CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
 
+  if (Args.hasArg(options::OPT_static))
+    CmdArgs.push_back("-static");
+  else if (Args.hasArg(options::OPT_shared))
+    CmdArgs.push_back("-shared");
+
   if (!Args.hasArg(options::OPT_nostdlib)) {
     CmdArgs.push_back(Args.MakeArgString(getToolChain().GetFilePath("crt0.o")));
     CmdArgs.push_back(Args.MakeArgString(getToolChain().GetFilePath("crti.o")));
@@ -5239,6 +5244,8 @@ void or1klinux::Link::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back(Args.MakeArgString(getToolChain().GetFilePath("crtn.o")));
   }
   AddLinkerInputs(getToolChain(), Inputs, Args, CmdArgs);
+
+  Args.AddAllArgs(CmdArgs, options::OPT_L);
 
   const ToolChain::path_list Paths = getToolChain().getFilePaths();
   for (ToolChain::path_list::const_iterator i = Paths.begin(), e = Paths.end();
