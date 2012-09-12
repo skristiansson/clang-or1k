@@ -5235,13 +5235,25 @@ void or1klinux::Link::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("-shared");
 
   if (!Args.hasArg(options::OPT_nostdlib)) {
-    CmdArgs.push_back(Args.MakeArgString(getToolChain().GetFilePath("crt0.o")));
-    CmdArgs.push_back(Args.MakeArgString(getToolChain().GetFilePath("crti.o")));
-    CmdArgs.push_back(Args.MakeArgString(getToolChain().
-                                         GetFilePath("crtbegin.o")));
-    CmdArgs.push_back(Args.MakeArgString(getToolChain().
-                                         GetFilePath("crtend.o")));
-    CmdArgs.push_back(Args.MakeArgString(getToolChain().GetFilePath("crtn.o")));
+    if (!Args.hasArg(options::OPT_shared)) {
+      CmdArgs.push_back(Args.MakeArgString(
+                          getToolChain().GetFilePath("crt0.o")));
+      CmdArgs.push_back(Args.MakeArgString(
+                          getToolChain().GetFilePath("crti.o")));
+      CmdArgs.push_back(Args.MakeArgString(
+                          getToolChain().GetFilePath("crtbegin.o")));
+      CmdArgs.push_back(Args.MakeArgString(
+                          getToolChain().GetFilePath("crtend.o")));
+      CmdArgs.push_back(Args.MakeArgString(
+                          getToolChain().GetFilePath("crtn.o")));
+    } else {
+      CmdArgs.push_back(Args.MakeArgString(
+                          getToolChain().GetFilePath("crti.o")));
+      CmdArgs.push_back(Args.MakeArgString(
+                          getToolChain().GetFilePath("crtbeginS.o")));
+      CmdArgs.push_back(Args.MakeArgString(
+                          getToolChain().GetFilePath("crtendS.o")));
+    }
   }
   AddLinkerInputs(getToolChain(), Inputs, Args, CmdArgs);
 
