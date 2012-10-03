@@ -21,6 +21,7 @@
 #include "clang/AST/ParentMap.h"
 #include "clang/AST/StmtCXX.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
 
 using namespace clang;
 using namespace ento;
@@ -104,11 +105,12 @@ void PathPieces::flattenTo(PathPieces &Primary, PathPieces &Current,
 PathDiagnostic::~PathDiagnostic() {}
 
 PathDiagnostic::PathDiagnostic(const Decl *declWithIssue,
-                               StringRef bugtype, StringRef desc,
-                               StringRef category)
+                               StringRef bugtype, StringRef verboseDesc,
+                               StringRef shortDesc, StringRef category)
   : DeclWithIssue(declWithIssue),
     BugType(StripTrailingDots(bugtype)),
-    Desc(StripTrailingDots(desc)),
+    VerboseDesc(StripTrailingDots(verboseDesc)),
+    ShortDesc(StripTrailingDots(shortDesc)),
     Category(StripTrailingDots(category)),
     path(pathImpl) {}
 
@@ -157,13 +159,13 @@ void PathDiagnosticConsumer::HandlePathDiagnostic(PathDiagnostic *D) {
           return; // FIXME: Emit a warning?
       
         // Check the source ranges.
-        for (PathDiagnosticPiece::range_iterator RI = piece->ranges_begin(),
-             RE = piece->ranges_end();
-             RI != RE; ++RI) {
-          SourceLocation L = SMgr.getExpansionLoc(RI->getBegin());
+        ArrayRef<SourceRange> Ranges = piece->getRanges();
+        for (ArrayRef<SourceRange>::iterator I = Ranges.begin(),
+                                             E = Ranges.end(); I != E; ++I) {
+          SourceLocation L = SMgr.getExpansionLoc(I->getBegin());
           if (!L.isFileID() || SMgr.getFileID(L) != FID)
             return; // FIXME: Emit a warning?
-          L = SMgr.getExpansionLoc(RI->getEnd());
+          L = SMgr.getExpansionLoc(I->getEnd());
           if (!L.isFileID() || SMgr.getFileID(L) != FID)
             return; // FIXME: Emit a warning?
         }
@@ -198,6 +200,7 @@ void PathDiagnosticConsumer::HandlePathDiagnostic(PathDiagnostic *D) {
     if (orig_size <= new_size)
       return;
 
+    assert(orig != D);
     Diags.RemoveNode(orig);
     delete orig;
   }
@@ -205,43 +208,155 @@ void PathDiagnosticConsumer::HandlePathDiagnostic(PathDiagnostic *D) {
   Diags.InsertNode(OwningD.take());
 }
 
+static llvm::Optional<bool> comparePath(const PathPieces &X,
+                                        const PathPieces &Y);
+static llvm::Optional<bool>
+compareControlFlow(const PathDiagnosticControlFlowPiece &X,
+                   const PathDiagnosticControlFlowPiece &Y) {
+  FullSourceLoc XSL = X.getStartLocation().asLocation();
+  FullSourceLoc YSL = Y.getStartLocation().asLocation();
+  if (XSL != YSL)
+    return XSL.isBeforeInTranslationUnitThan(YSL);
+  FullSourceLoc XEL = X.getEndLocation().asLocation();
+  FullSourceLoc YEL = Y.getEndLocation().asLocation();
+  if (XEL != YEL)
+    return XEL.isBeforeInTranslationUnitThan(YEL);
+  return llvm::Optional<bool>();
+}
+
+static llvm::Optional<bool>
+compareMacro(const PathDiagnosticMacroPiece &X,
+             const PathDiagnosticMacroPiece &Y) {
+  return comparePath(X.subPieces, Y.subPieces);
+}
+
+static llvm::Optional<bool>
+compareCall(const PathDiagnosticCallPiece &X,
+            const PathDiagnosticCallPiece &Y) {
+  FullSourceLoc X_CEL = X.callEnter.asLocation();
+  FullSourceLoc Y_CEL = Y.callEnter.asLocation();
+  if (X_CEL != Y_CEL)
+    return X_CEL.isBeforeInTranslationUnitThan(Y_CEL);
+  FullSourceLoc X_CEWL = X.callEnterWithin.asLocation();
+  FullSourceLoc Y_CEWL = Y.callEnterWithin.asLocation();
+  if (X_CEWL != Y_CEWL)
+    return X_CEWL.isBeforeInTranslationUnitThan(Y_CEWL);
+  FullSourceLoc X_CRL = X.callReturn.asLocation();
+  FullSourceLoc Y_CRL = Y.callReturn.asLocation();
+  if (X_CRL != Y_CRL)
+    return X_CRL.isBeforeInTranslationUnitThan(Y_CRL);
+  return comparePath(X.path, Y.path);
+}
+
+static llvm::Optional<bool> comparePiece(const PathDiagnosticPiece &X,
+                                         const PathDiagnosticPiece &Y) {
+  if (X.getKind() != Y.getKind())
+    return X.getKind() < Y.getKind();
+  
+  FullSourceLoc XL = X.getLocation().asLocation();
+  FullSourceLoc YL = Y.getLocation().asLocation();
+  if (XL != YL)
+    return XL.isBeforeInTranslationUnitThan(YL);
+
+  if (X.getString() != Y.getString())
+    return X.getString() < Y.getString();
+
+  if (X.getRanges().size() != Y.getRanges().size())
+    return X.getRanges().size() < Y.getRanges().size();
+
+  const SourceManager &SM = XL.getManager();
+  
+  for (unsigned i = 0, n = X.getRanges().size(); i < n; ++i) {
+    SourceRange XR = X.getRanges()[i];
+    SourceRange YR = Y.getRanges()[i];
+    if (XR != YR) {
+      if (XR.getBegin() != YR.getBegin())
+        return SM.isBeforeInTranslationUnit(XR.getBegin(), YR.getBegin());
+      return SM.isBeforeInTranslationUnit(XR.getEnd(), YR.getEnd());
+    }
+  }
+  
+  switch (X.getKind()) {
+    case clang::ento::PathDiagnosticPiece::ControlFlow:
+      return compareControlFlow(cast<PathDiagnosticControlFlowPiece>(X),
+                                cast<PathDiagnosticControlFlowPiece>(Y));
+    case clang::ento::PathDiagnosticPiece::Event:
+      return llvm::Optional<bool>();
+    case clang::ento::PathDiagnosticPiece::Macro:
+      return compareMacro(cast<PathDiagnosticMacroPiece>(X),
+                          cast<PathDiagnosticMacroPiece>(Y));
+    case clang::ento::PathDiagnosticPiece::Call:
+      return compareCall(cast<PathDiagnosticCallPiece>(X),
+                         cast<PathDiagnosticCallPiece>(Y));
+  }
+  llvm_unreachable("all cases handled");
+}
+
+static llvm::Optional<bool> comparePath(const PathPieces &X,
+                                        const PathPieces &Y) {
+  if (X.size() != Y.size())
+    return X.size() < Y.size();
+  for (unsigned i = 0, n = X.size(); i != n; ++i) {
+    llvm::Optional<bool> b = comparePiece(*X[i], *Y[i]);
+    if (b.hasValue())
+      return b.getValue();
+  }
+  return llvm::Optional<bool>();
+}
+
+static bool compare(const PathDiagnostic &X, const PathDiagnostic &Y) {
+  FullSourceLoc XL = X.getLocation().asLocation();
+  FullSourceLoc YL = Y.getLocation().asLocation();
+  if (XL != YL)
+    return XL.isBeforeInTranslationUnitThan(YL);
+  if (X.getBugType() != Y.getBugType())
+    return X.getBugType() < Y.getBugType();
+  if (X.getCategory() != Y.getCategory())
+    return X.getCategory() < Y.getCategory();
+  if (X.getVerboseDescription() != Y.getVerboseDescription())
+    return X.getVerboseDescription() < Y.getVerboseDescription();
+  if (X.getShortDescription() != Y.getShortDescription())
+    return X.getShortDescription() < Y.getShortDescription();
+  if (X.getDeclWithIssue() != Y.getDeclWithIssue()) {
+    const Decl *XD = X.getDeclWithIssue();
+    if (!XD)
+      return true;
+    const Decl *YD = Y.getDeclWithIssue();
+    if (!YD)
+      return false;
+    SourceLocation XDL = XD->getLocation();
+    SourceLocation YDL = YD->getLocation();
+    if (XDL != YDL) {
+      const SourceManager &SM = XL.getManager();
+      return SM.isBeforeInTranslationUnit(XDL, YDL);
+    }
+  }
+  PathDiagnostic::meta_iterator XI = X.meta_begin(), XE = X.meta_end();
+  PathDiagnostic::meta_iterator YI = Y.meta_begin(), YE = Y.meta_end();
+  if (XE - XI != YE - YI)
+    return (XE - XI) < (YE - YI);
+  for ( ; XI != XE ; ++XI, ++YI) {
+    if (*XI != *YI)
+      return (*XI) < (*YI);
+  }
+  llvm::Optional<bool> b = comparePath(X.path, Y.path);
+  assert(b.hasValue());
+  return b.getValue();
+}
 
 namespace {
 struct CompareDiagnostics {
   // Compare if 'X' is "<" than 'Y'.
   bool operator()(const PathDiagnostic *X, const PathDiagnostic *Y) const {
-    // First compare by location
-    const FullSourceLoc &XLoc = X->getLocation().asLocation();
-    const FullSourceLoc &YLoc = Y->getLocation().asLocation();
-    if (XLoc < YLoc)
-      return true;
-    if (XLoc != YLoc)
+    if (X == Y)
       return false;
-    
-    // Next, compare by bug type.
-    StringRef XBugType = X->getBugType();
-    StringRef YBugType = Y->getBugType();
-    if (XBugType < YBugType)
-      return true;
-    if (XBugType != YBugType)
-      return false;
-    
-    // Next, compare by bug description.
-    StringRef XDesc = X->getDescription();
-    StringRef YDesc = Y->getDescription();
-    if (XDesc < YDesc)
-      return true;
-    if (XDesc != YDesc)
-      return false;
-    
-    // FIXME: Further refine by comparing PathDiagnosticPieces?
-    return false;    
-  }  
-};  
+    return compare(*X, *Y);
+  }
+};
 }
 
-void
-PathDiagnosticConsumer::FlushDiagnostics(SmallVectorImpl<std::string> *Files) {
+void PathDiagnosticConsumer::FlushDiagnostics(
+                                     PathDiagnosticConsumer::FilesMade *Files) {
   if (flushed)
     return;
   
@@ -250,11 +365,9 @@ PathDiagnosticConsumer::FlushDiagnostics(SmallVectorImpl<std::string> *Files) {
   std::vector<const PathDiagnostic *> BatchDiags;
   for (llvm::FoldingSet<PathDiagnostic>::iterator it = Diags.begin(),
        et = Diags.end(); it != et; ++it) {
-    BatchDiags.push_back(&*it);
+    const PathDiagnostic *D = &*it;
+    BatchDiags.push_back(D);
   }
-  
-  // Clear out the FoldingSet.
-  Diags.clear();
 
   // Sort the diagnostics so that they are always emitted in a deterministic
   // order.
@@ -269,6 +382,42 @@ PathDiagnosticConsumer::FlushDiagnostics(SmallVectorImpl<std::string> *Files) {
     const PathDiagnostic *D = *it;
     delete D;
   }
+  
+  // Clear out the FoldingSet.
+  Diags.clear();
+}
+
+void PathDiagnosticConsumer::FilesMade::addDiagnostic(const PathDiagnostic &PD,
+                                                      StringRef ConsumerName,
+                                                      StringRef FileName) {
+  llvm::FoldingSetNodeID NodeID;
+  NodeID.Add(PD);
+  void *InsertPos;
+  PDFileEntry *Entry = FindNodeOrInsertPos(NodeID, InsertPos);
+  if (!Entry) {
+    Entry = Alloc.Allocate<PDFileEntry>();
+    Entry = new (Entry) PDFileEntry(NodeID);
+    InsertNode(Entry, InsertPos);
+  }
+  
+  // Allocate persistent storage for the file name.
+  char *FileName_cstr = (char*) Alloc.Allocate(FileName.size(), 1);
+  memcpy(FileName_cstr, FileName.data(), FileName.size());
+
+  Entry->files.push_back(std::make_pair(ConsumerName,
+                                        StringRef(FileName_cstr,
+                                                  FileName.size())));
+}
+
+PathDiagnosticConsumer::PDFileEntry::ConsumerFiles *
+PathDiagnosticConsumer::FilesMade::getFiles(const PathDiagnostic &PD) {
+  llvm::FoldingSetNodeID NodeID;
+  NodeID.Add(PD);
+  void *InsertPos;
+  PDFileEntry *Entry = FindNodeOrInsertPos(NodeID, InsertPos);
+  if (!Entry)
+    return 0;
+  return &Entry->files;
 }
 
 //===----------------------------------------------------------------------===//
@@ -587,24 +736,6 @@ void PathDiagnosticLocation::flatten() {
   }
 }
 
-PathDiagnosticLocation PathDiagnostic::getLocation() const {
-  assert(path.size() > 0 &&
-         "getLocation() requires a non-empty PathDiagnostic.");
-  
-  PathDiagnosticPiece *p = path.rbegin()->getPtr();
-  
-  while (true) {
-    if (PathDiagnosticCallPiece *cp = dyn_cast<PathDiagnosticCallPiece>(p)) {
-      assert(!cp->path.empty());
-      p = cp->path.rbegin()->getPtr();
-      continue;
-    }
-    break;
-  }
-  
-  return p->getLocation();
-}
-
 //===----------------------------------------------------------------------===//
 // Manipulation of PathDiagnosticCallPieces.
 //===----------------------------------------------------------------------===//
@@ -718,7 +849,9 @@ void PathDiagnosticPiece::Profile(llvm::FoldingSetNodeID &ID) const {
   ID.AddString(str);
   // FIXME: Add profiling support for code hints.
   ID.AddInteger((unsigned) getDisplayHint());
-  for (range_iterator I = ranges_begin(), E = ranges_end(); I != E; ++I) {
+  ArrayRef<SourceRange> Ranges = getRanges();
+  for (ArrayRef<SourceRange>::iterator I = Ranges.begin(), E = Ranges.end();
+                                        I != E; ++I) {
     ID.AddInteger(I->getBegin().getRawEncoding());
     ID.AddInteger(I->getEnd().getRawEncoding());
   }  
@@ -751,10 +884,9 @@ void PathDiagnosticMacroPiece::Profile(llvm::FoldingSetNodeID &ID) const {
 }
 
 void PathDiagnostic::Profile(llvm::FoldingSetNodeID &ID) const {
-  if (!path.empty())
-    getLocation().Profile(ID);
+  ID.Add(getLocation());
   ID.AddString(BugType);
-  ID.AddString(Desc);
+  ID.AddString(VerboseDesc);
   ID.AddString(Category);
 }
 
@@ -816,42 +948,16 @@ std::string StackHintGeneratorForSymbol::getMessage(const ExplodedNode *N){
   return getMessageForSymbolNotFound();
 }
 
-/// TODO: This is copied from clang diagnostics. Maybe we could just move it to
-/// some common place. (Same as HandleOrdinalModifier.)
-void StackHintGeneratorForSymbol::printOrdinal(unsigned ValNo,
-                                               llvm::raw_svector_ostream &Out) {
-  assert(ValNo != 0 && "ValNo must be strictly positive!");
-
-  // We could use text forms for the first N ordinals, but the numeric
-  // forms are actually nicer in diagnostics because they stand out.
-  Out << ValNo;
-
-  // It is critically important that we do this perfectly for
-  // user-written sequences with over 100 elements.
-  switch (ValNo % 100) {
-  case 11:
-  case 12:
-  case 13:
-    Out << "th"; return;
-  default:
-    switch (ValNo % 10) {
-    case 1: Out << "st"; return;
-    case 2: Out << "nd"; return;
-    case 3: Out << "rd"; return;
-    default: Out << "th"; return;
-    }
-  }
-}
-
 std::string StackHintGeneratorForSymbol::getMessageForArg(const Expr *ArgE,
-                                                        unsigned ArgIndex) {
+                                                          unsigned ArgIndex) {
+  // Printed parameters start at 1, not 0.
+  ++ArgIndex;
+
   SmallString<200> buf;
   llvm::raw_svector_ostream os(buf);
 
-  os << Msg << " via ";
-  // Printed parameters start at 1, not 0.
-  printOrdinal(++ArgIndex, os);
-  os << " parameter";
+  os << Msg << " via " << ArgIndex << llvm::getOrdinalSuffix(ArgIndex)
+     << " parameter";
 
   return os.str();
 }

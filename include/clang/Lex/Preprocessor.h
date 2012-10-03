@@ -55,6 +55,27 @@ class DirectoryLookup;
 class PreprocessingRecord;
 class ModuleLoader;
 
+/// \brief Stores token information for comparing actual tokens with
+/// predefined values.  Only handles simple tokens and identifiers.
+class TokenValue {
+  tok::TokenKind Kind;
+  IdentifierInfo *II;
+
+public:
+  TokenValue(tok::TokenKind Kind) : Kind(Kind), II(0) {
+    assert(Kind != tok::raw_identifier && "Raw identifiers are not supported.");
+    assert(Kind != tok::identifier &&
+           "Identifiers should be created by TokenValue(IdentifierInfo *)");
+    assert(!tok::isLiteral(Kind) && "Literals are not supported.");
+    assert(!tok::isAnnotation(Kind) && "Annotations are not supported.");
+  }
+  TokenValue(IdentifierInfo *II) : Kind(tok::identifier), II(II) {}
+  bool operator==(const Token &Tok) const {
+    return Tok.getKind() == Kind &&
+        (!II || II == Tok.getIdentifierInfo());
+  }
+};
+
 /// Preprocessor - This object engages in a tight little dance with the lexer to
 /// efficiently preprocess tokens.  Lexers know only about tokens within a
 /// single source file, and don't know anything about preprocessor-level issues
@@ -98,6 +119,8 @@ class Preprocessor : public RefCountedBase<Preprocessor> {
   IdentifierInfo *Ident__has_include;              // __has_include
   IdentifierInfo *Ident__has_include_next;         // __has_include_next
   IdentifierInfo *Ident__has_warning;              // __has_warning
+  IdentifierInfo *Ident__building_module;          // __building_module
+  IdentifierInfo *Ident__MODULE__;                 // __MODULE__
 
   SourceLocation DATELoc, TIMELoc;
   unsigned CounterValue;  // Next __COUNTER__ value.
@@ -274,10 +297,12 @@ class Preprocessor : public RefCountedBase<Preprocessor> {
   };
   SmallVector<MacroExpandsInfo, 2> DelayedMacroExpandsCallbacks;
 
-  /// Macros - For each IdentifierInfo with 'HasMacro' set, we keep a mapping
-  /// to the actual definition of the macro.
+  /// Macros - For each IdentifierInfo that was associated with a macro, we
+  /// keep a mapping to the history of all macro definitions and #undefs in
+  /// the reverse order (the latest one is in the head of the list).
   llvm::DenseMap<IdentifierInfo*, MacroInfo*> Macros;
-
+  friend class ASTReader;
+  
   /// \brief Macros that we want to warn because they are not used at the end
   /// of the translation unit; we store just their SourceLocations instead
   /// something like MacroInfo*. The benefit of this is that when we are
@@ -361,8 +386,6 @@ private:  // Cached tokens state.
   /// MICache - A "freelist" of MacroInfo objects that can be reused for quick
   /// allocation.
   MacroInfoChain *MICache;
-
-  MacroInfo *getInfoForMacro(IdentifierInfo *II) const;
 
 public:
   Preprocessor(DiagnosticsEngine &diags, LangOptions &opts,
@@ -463,19 +486,37 @@ public:
     if (!II->hasMacroDefinition())
       return 0;
 
-    return getInfoForMacro(II);
+    MacroInfo *MI = getMacroInfoHistory(II);
+    assert(MI->getUndefLoc().isInvalid() && "Macro is undefined!");
+    return MI;
   }
+
+  /// \brief Given an identifier, return the (probably #undef'd) MacroInfo
+  /// representing the most recent macro definition. One can iterate over all
+  /// previous macro definitions from it. This method should only be called for
+  /// identifiers that hadMacroDefinition().
+  MacroInfo *getMacroInfoHistory(IdentifierInfo *II) const;
 
   /// \brief Specify a macro for this identifier.
   void setMacroInfo(IdentifierInfo *II, MacroInfo *MI,
                     bool LoadedFromAST = false);
+  /// \brief Undefine a macro for this identifier.
+  void clearMacroInfo(IdentifierInfo *II);
 
-  /// macro_iterator/macro_begin/macro_end - This allows you to walk the current
-  /// state of the macro table.  This visits every currently-defined macro.
+  /// macro_iterator/macro_begin/macro_end - This allows you to walk the macro
+  /// history table. Currently defined macros have
+  /// IdentifierInfo::hasMacroDefinition() set and an empty
+  /// MacroInfo::getUndefLoc() at the head of the list.
   typedef llvm::DenseMap<IdentifierInfo*,
                          MacroInfo*>::const_iterator macro_iterator;
   macro_iterator macro_begin(bool IncludeExternalMacros = true) const;
   macro_iterator macro_end(bool IncludeExternalMacros = true) const;
+
+  /// \brief Return the name of the macro defined before \p Loc that has
+  /// spelling \p Tokens.  If there are multiple macros with same spelling,
+  /// return the last one defined.
+  StringRef getLastMacroWithSpelling(SourceLocation Loc,
+                                     ArrayRef<TokenValue> Tokens) const;
 
   const std::string &getPredefines() const { return Predefines; }
   /// setPredefines - Set the predefines for this Preprocessor.  These
@@ -501,8 +542,8 @@ public:
   }
 
   /// RemovePragmaHandler - Remove the specific pragma handler from
-  /// the preprocessor. If \arg Namespace is non-null, then it should
-  /// be the namespace that \arg Handler was added to. It is an error
+  /// the preprocessor. If \p Namespace is non-null, then it should
+  /// be the namespace that \p Handler was added to. It is an error
   /// to remove a handler that has not been registered.
   void RemovePragmaHandler(StringRef Namespace, PragmaHandler *Handler);
   void RemovePragmaHandler(PragmaHandler *Handler) {
@@ -564,7 +605,8 @@ public:
   ///
   /// ILEnd specifies the location of the ')' for a function-like macro or the
   /// identifier for an object-like macro.
-  void EnterMacro(Token &Identifier, SourceLocation ILEnd, MacroArgs *Args);
+  void EnterMacro(Token &Identifier, SourceLocation ILEnd, MacroInfo *Macro,
+                  MacroArgs *Args);
 
   /// EnterTokenStream - Add a "macro" context to the top of the include stack,
   /// which will cause the lexer to start returning the specified tokens.
@@ -720,6 +762,14 @@ public:
   /// enabled.
   void ReplaceLastTokenWithAnnotation(const Token &Tok) {
     assert(Tok.isAnnotation() && "Expected annotation token");
+    if (CachedLexPos != 0 && isBacktrackEnabled())
+      CachedTokens[CachedLexPos-1] = Tok;
+  }
+
+  /// TypoCorrectToken - Update the current token to represent the provided
+  /// identifier, in order to cache an action performed by typo correction.
+  void TypoCorrectToken(const Token &Tok) {
+    assert(Tok.getIdentifierInfo() && "Expected identifier token");
     if (CachedLexPos != 0 && isBacktrackEnabled())
       CachedTokens[CachedLexPos-1] = Tok;
   }
@@ -892,7 +942,7 @@ public:
   /// CreateString - Plop the specified string into a scratch buffer and set the
   /// specified token's location and length to it.  If specified, the source
   /// location provides a location of the expansion point of the token.
-  void CreateString(const char *Buf, unsigned Len, Token &Tok,
+  void CreateString(StringRef Str, Token &Tok,
                     SourceLocation ExpansionLocStart = SourceLocation(),
                     SourceLocation ExpansionLocEnd = SourceLocation());
 
@@ -929,7 +979,7 @@ public:
   /// \brief Returns true if the given MacroID location points at the last
   /// token of the macro expansion.
   ///
-  /// \param MacroBegin If non-null and function returns true, it is set to
+  /// \param MacroEnd If non-null and function returns true, it is set to
   /// end location of the macro.
   bool isAtEndOfMacroExpansion(SourceLocation loc,
                                SourceLocation *MacroEnd = 0) const {
@@ -1103,10 +1153,10 @@ public:
   /// from a macro as multiple tokens, which need to be glued together.  This
   /// occurs for code like:
   /// \code
-  ///    \#define FOO <a/b.h>
+  ///    \#define FOO <x/y.h>
   ///    \#include FOO
   /// \endcode
-  /// because in this case, "<a/b.h>" is returned as 7 tokens, not one.
+  /// because in this case, "<x/y.h>" is returned as 7 tokens, not one.
   ///
   /// This code concatenates and consumes tokens up to the '>' token.  It
   /// returns false if the > was found, otherwise it returns true if it finds

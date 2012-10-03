@@ -27,15 +27,15 @@
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/Format.h"
 #include <cstdio>
 #include <ctime>
 using namespace clang;
 
-MacroInfo *Preprocessor::getInfoForMacro(IdentifierInfo *II) const {
-  assert(II->hasMacroDefinition() && "Identifier is not a macro!");
-  
-  llvm::DenseMap<IdentifierInfo*, MacroInfo*>::const_iterator Pos
-    = Macros.find(II);
+MacroInfo *Preprocessor::getMacroInfoHistory(IdentifierInfo *II) const {
+  assert(II->hadMacroDefinition() && "Identifier has not been not a macro!");
+
+  macro_iterator Pos = Macros.find(II);
   if (Pos == Macros.end()) {
     // Load this macro from the external source.
     getExternalSource()->LoadMacroDefinition(II);
@@ -49,17 +49,23 @@ MacroInfo *Preprocessor::getInfoForMacro(IdentifierInfo *II) const {
 ///
 void Preprocessor::setMacroInfo(IdentifierInfo *II, MacroInfo *MI,
                                 bool LoadedFromAST) {
-  if (MI) {
-    Macros[II] = MI;
-    II->setHasMacroDefinition(true);
-    if (II->isFromAST() && !LoadedFromAST)
-      II->setChangedSinceDeserialization();
-  } else if (II->hasMacroDefinition()) {
-    Macros.erase(II);
-    II->setHasMacroDefinition(false);
-    if (II->isFromAST() && !LoadedFromAST)
-      II->setChangedSinceDeserialization();
-  }
+  assert(MI && "MacroInfo should be non-zero!");
+  assert((LoadedFromAST || MI->getUndefLoc().isInvalid()) &&
+         "Undefined macros can only be registered when just LoadedFromAST");
+  MI->setPreviousDefinition(Macros[II]);
+  Macros[II] = MI;
+  II->setHasMacroDefinition(MI->getUndefLoc().isInvalid());
+  if (II->isFromAST() && !LoadedFromAST)
+    II->setChangedSinceDeserialization();
+}
+
+/// \brief Undefine a macro for this identifier.
+void Preprocessor::clearMacroInfo(IdentifierInfo *II) {
+  assert(II->hasMacroDefinition() && "Macro is not defined!");
+  assert(Macros[II]->getUndefLoc().isValid() && "Macro is still defined!");
+  II->setHasMacroDefinition(false);
+  if (II->isFromAST())
+    II->setChangedSinceDeserialization();
 }
 
 /// RegisterBuiltinMacro - Register the specified identifier in the identifier
@@ -100,6 +106,20 @@ void Preprocessor::RegisterBuiltinMacros() {
   Ident__has_include_next = RegisterBuiltinMacro(*this, "__has_include_next");
   Ident__has_warning      = RegisterBuiltinMacro(*this, "__has_warning");
 
+  // Modules.
+  if (LangOpts.Modules) {
+    Ident__building_module  = RegisterBuiltinMacro(*this, "__building_module");
+
+    // __MODULE__
+    if (!LangOpts.CurrentModule.empty())
+      Ident__MODULE__ = RegisterBuiltinMacro(*this, "__MODULE__");
+    else
+      Ident__MODULE__ = 0;
+  } else {
+    Ident__building_module = 0;
+    Ident__MODULE__ = 0;
+  }
+  
   // Microsoft Extensions.
   if (LangOpts.MicrosoftExt) 
     Ident__pragma = RegisterBuiltinMacro(*this, "__pragma");
@@ -337,7 +357,7 @@ bool Preprocessor::HandleMacroExpandedIdentifier(Token &Identifier,
   }
 
   // Start expanding the macro.
-  EnterMacro(Identifier, ExpansionEnd, Args);
+  EnterMacro(Identifier, ExpansionEnd, MI, Args);
 
   // Now that the macro is at the top of the include stack, ask the
   // preprocessor to read the next token from it.
@@ -581,27 +601,27 @@ static void ComputeDATE_TIME(SourceLocation &DATELoc, SourceLocation &TIMELoc,
     "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
   };
 
-  char TmpBuffer[32];
-#ifdef LLVM_ON_WIN32
-  sprintf(TmpBuffer, "\"%s %2d %4d\"", Months[TM->tm_mon], TM->tm_mday,
-          TM->tm_year+1900);
-#else
-  snprintf(TmpBuffer, sizeof(TmpBuffer), "\"%s %2d %4d\"", Months[TM->tm_mon], TM->tm_mday,
-          TM->tm_year+1900);
-#endif
+  {
+    SmallString<32> TmpBuffer;
+    llvm::raw_svector_ostream TmpStream(TmpBuffer);
+    TmpStream << llvm::format("\"%s %2d %4d\"", Months[TM->tm_mon],
+                              TM->tm_mday, TM->tm_year + 1900);
+    Token TmpTok;
+    TmpTok.startToken();
+    PP.CreateString(TmpStream.str(), TmpTok);
+    DATELoc = TmpTok.getLocation();
+  }
 
-  Token TmpTok;
-  TmpTok.startToken();
-  PP.CreateString(TmpBuffer, strlen(TmpBuffer), TmpTok);
-  DATELoc = TmpTok.getLocation();
-
-#ifdef LLVM_ON_WIN32
-  sprintf(TmpBuffer, "\"%02d:%02d:%02d\"", TM->tm_hour, TM->tm_min, TM->tm_sec);
-#else
-  snprintf(TmpBuffer, sizeof(TmpBuffer), "\"%02d:%02d:%02d\"", TM->tm_hour, TM->tm_min, TM->tm_sec);
-#endif
-  PP.CreateString(TmpBuffer, strlen(TmpBuffer), TmpTok);
-  TIMELoc = TmpTok.getLocation();
+  {
+    SmallString<32> TmpBuffer;
+    llvm::raw_svector_ostream TmpStream(TmpBuffer);
+    TmpStream << llvm::format("\"%02d:%02d:%02d\"",
+                              TM->tm_hour, TM->tm_min, TM->tm_sec);
+    Token TmpTok;
+    TmpTok.startToken();
+    PP.CreateString(TmpStream.str(), TmpTok);
+    TIMELoc = TmpTok.getLocation();
+  }
 }
 
 
@@ -641,8 +661,7 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
            // Objective-C features
            .Case("objc_arr", LangOpts.ObjCAutoRefCount) // FIXME: REMOVE?
            .Case("objc_arc", LangOpts.ObjCAutoRefCount)
-           .Case("objc_arc_weak", LangOpts.ObjCAutoRefCount && 
-                 LangOpts.ObjCRuntimeHasWeak)
+           .Case("objc_arc_weak", LangOpts.ObjCARCWeak)
            .Case("objc_default_synthesize_properties", LangOpts.ObjC2)
            .Case("objc_fixed_enum", LangOpts.ObjC2)
            .Case("objc_instancetype", LangOpts.ObjC2)
@@ -716,22 +735,12 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
             // "struct __is_empty" parsing hack hasn't been needed in this
             // translation unit. If it has, __is_empty reverts to a normal
             // identifier and __has_feature(is_empty) evaluates false.
-           .Case("is_empty", 
-                 LangOpts.CPlusPlus && 
-                 PP.getIdentifierInfo("__is_empty")->getTokenID()
-                                                            != tok::identifier)
+           .Case("is_empty", LangOpts.CPlusPlus)
            .Case("is_enum", LangOpts.CPlusPlus)
            .Case("is_final", LangOpts.CPlusPlus)
            .Case("is_literal", LangOpts.CPlusPlus)
            .Case("is_standard_layout", LangOpts.CPlusPlus)
-           // __is_pod is available only if the horrible
-           // "struct __is_pod" parsing hack hasn't been needed in this
-           // translation unit. If it has, __is_pod reverts to a normal
-           // identifier and __has_feature(is_pod) evaluates false.
-           .Case("is_pod", 
-                 LangOpts.CPlusPlus && 
-                 PP.getIdentifierInfo("__is_pod")->getTokenID()
-                                                            != tok::identifier)
+           .Case("is_pod", LangOpts.CPlusPlus)
            .Case("is_polymorphic", LangOpts.CPlusPlus)
            .Case("is_trivial", LangOpts.CPlusPlus)
            .Case("is_trivially_assignable", LangOpts.CPlusPlus)
@@ -909,6 +918,47 @@ static bool EvaluateHasIncludeNext(Token &Tok,
   return EvaluateHasIncludeCommon(Tok, II, PP, Lookup);
 }
 
+/// \brief Process __building_module(identifier) expression.
+/// \returns true if we are building the named module, false otherwise.
+static bool EvaluateBuildingModule(Token &Tok,
+                                   IdentifierInfo *II, Preprocessor &PP) {
+  // Get '('.
+  PP.LexNonComment(Tok);
+
+  // Ensure we have a '('.
+  if (Tok.isNot(tok::l_paren)) {
+    PP.Diag(Tok.getLocation(), diag::err_pp_missing_lparen) << II->getName();
+    return false;
+  }
+
+  // Save '(' location for possible missing ')' message.
+  SourceLocation LParenLoc = Tok.getLocation();
+
+  // Get the module name.
+  PP.LexNonComment(Tok);
+
+  // Ensure that we have an identifier.
+  if (Tok.isNot(tok::identifier)) {
+    PP.Diag(Tok.getLocation(), diag::err_expected_id_building_module);
+    return false;
+  }
+
+  bool Result
+    = Tok.getIdentifierInfo()->getName() == PP.getLangOpts().CurrentModule;
+
+  // Get ')'.
+  PP.LexNonComment(Tok);
+
+  // Ensure we have a trailing ).
+  if (Tok.isNot(tok::r_paren)) {
+    PP.Diag(Tok.getLocation(), diag::err_pp_missing_rparen) << II->getName();
+    PP.Diag(LParenLoc, diag::note_matching) << "(";
+    return false;
+  }
+
+  return Result;
+}
+
 /// ExpandBuiltinMacro - If an identifier token is read that is to be expanded
 /// as a builtin macro, handle it and return the next token as 'Tok'.
 void Preprocessor::ExpandBuiltinMacro(Token &Tok) {
@@ -1054,7 +1104,7 @@ void Preprocessor::ExpandBuiltinMacro(Token &Tok) {
     if (Tok.is(tok::l_paren)) {
       // Read the identifier
       Lex(Tok);
-      if (Tok.is(tok::identifier)) {
+      if (Tok.is(tok::identifier) || Tok.is(tok::kw_const)) {
         FeatureII = Tok.getIdentifierInfo();
 
         // Read the ')'.
@@ -1164,11 +1214,22 @@ void Preprocessor::ExpandBuiltinMacro(Token &Tok) {
 
     OS << (int)Value;
     Tok.setKind(tok::numeric_constant);
+  } else if (II == Ident__building_module) {
+    // The argument to this builtin should be an identifier. The
+    // builtin evaluates to 1 when that identifier names the module we are
+    // currently building.
+    OS << (int)EvaluateBuildingModule(Tok, II, *this);
+    Tok.setKind(tok::numeric_constant);
+  } else if (II == Ident__MODULE__) {
+    // The current module as an identifier.
+    OS << getLangOpts().CurrentModule;
+    IdentifierInfo *ModuleII = getIdentifierInfo(getLangOpts().CurrentModule);
+    Tok.setIdentifierInfo(ModuleII);
+    Tok.setKind(ModuleII->getTokenID());
   } else {
     llvm_unreachable("Unknown identifier!");
   }
-  CreateString(OS.str().data(), OS.str().size(), Tok,
-               Tok.getLocation(), Tok.getLocation());
+  CreateString(OS.str(), Tok, Tok.getLocation(), Tok.getLocation());
 }
 
 void Preprocessor::markMacroAsUsed(MacroInfo *MI) {

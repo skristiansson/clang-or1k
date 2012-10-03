@@ -266,6 +266,7 @@ public:
   static const TST TST_enum = clang::TST_enum;
   static const TST TST_union = clang::TST_union;
   static const TST TST_struct = clang::TST_struct;
+  static const TST TST_interface = clang::TST_interface;
   static const TST TST_class = clang::TST_class;
   static const TST TST_typename = clang::TST_typename;
   static const TST TST_typeofType = clang::TST_typeofType;
@@ -378,11 +379,12 @@ private:
   }
   static bool isDeclRep(TST T) {
     return (T == TST_enum || T == TST_struct ||
-            T == TST_union || T == TST_class);
+            T == TST_interface || T == TST_union ||
+            T == TST_class);
   }
 
-  DeclSpec(const DeclSpec&);       // DO NOT IMPLEMENT
-  void operator=(const DeclSpec&); // DO NOT IMPLEMENT
+  DeclSpec(const DeclSpec &) LLVM_DELETED_FUNCTION;
+  void operator=(const DeclSpec &) LLVM_DELETED_FUNCTION;
 public:
 
   DeclSpec(AttributeFactory &attrFactory)
@@ -781,8 +783,9 @@ private:
 /// \brief Represents a C++ unqualified-id that has been parsed. 
 class UnqualifiedId {
 private:
-  const UnqualifiedId &operator=(const UnqualifiedId &); // DO NOT IMPLEMENT
-  
+  UnqualifiedId(const UnqualifiedId &Other) LLVM_DELETED_FUNCTION;
+  const UnqualifiedId &operator=(const UnqualifiedId &) LLVM_DELETED_FUNCTION;
+
 public:
   /// \brief Describes the kind of unqualified-id parsed.
   enum IdKind {
@@ -856,17 +859,6 @@ public:
   SourceLocation EndLocation;
   
   UnqualifiedId() : Kind(IK_Identifier), Identifier(0) { }
-
-  /// \brief Do not use this copy constructor. It is temporary, and only
-  /// exists because we are holding FieldDeclarators in a SmallVector when we
-  /// don't actually need them.
-  ///
-  /// FIXME: Kill this copy constructor.
-  UnqualifiedId(const UnqualifiedId &Other) 
-    : Kind(IK_Identifier), Identifier(Other.Identifier), 
-      StartLocation(Other.StartLocation), EndLocation(Other.EndLocation) {
-    assert(Other.Kind == IK_Identifier && "Cannot copy non-identifiers");
-  }
 
   /// \brief Clear out this unqualified-id, setting it to default (invalid) 
   /// state.

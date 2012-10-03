@@ -202,6 +202,12 @@ llvm::MDNode *CodeGenModule::getTBAAInfoForVTablePtr() {
   return TBAA->getTBAAInfoForVTablePtr();
 }
 
+llvm::MDNode *CodeGenModule::getTBAAStructInfo(QualType QTy) {
+  if (!TBAA)
+    return 0;
+  return TBAA->getTBAAStructInfo(QTy);
+}
+
 void CodeGenModule::DecorateInstruction(llvm::Instruction *Inst,
                                         llvm::MDNode *TBAAInfo) {
   Inst->setMetadata(llvm::LLVMContext::MD_tbaa, TBAAInfo);
@@ -572,7 +578,7 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
 
   // (noinline wins over always_inline, and we can't specify both in IR)
   if ((D->hasAttr<AlwaysInlineAttr>() || D->hasAttr<ForceInlineAttr>()) &&
-      !F->hasFnAttr(llvm::Attribute::NoInline))
+      !F->getFnAttributes().hasNoInlineAttr())
     F->addFnAttr(llvm::Attribute::AlwaysInline);
 
   // FIXME: Communicate hot and cold attributes to LLVM more directly.
@@ -581,6 +587,10 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
 
   if (isa<CXXConstructorDecl>(D) || isa<CXXDestructorDecl>(D))
     F->setUnnamedAddr(true);
+
+  if (const CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(D))
+    if (MD->isVirtual())
+      F->setUnnamedAddr(true);
 
   if (LangOpts.getStackProtector() == LangOptions::SSPOn)
     F->addFnAttr(llvm::Attribute::StackProtect);
@@ -1051,12 +1061,10 @@ CodeGenModule::GetOrCreateLLVMFunction(StringRef MangledName,
   // Lookup the entry, lazily creating it if necessary.
   llvm::GlobalValue *Entry = GetGlobalValue(MangledName);
   if (Entry) {
-    if (WeakRefReferences.count(Entry)) {
+    if (WeakRefReferences.erase(Entry)) {
       const FunctionDecl *FD = cast_or_null<FunctionDecl>(D.getDecl());
       if (FD && !FD->hasAttr<WeakAttr>())
         Entry->setLinkage(llvm::Function::ExternalLinkage);
-
-      WeakRefReferences.erase(Entry);
     }
 
     if (Entry->getType()->getElementType() == Ty)
@@ -1197,11 +1205,9 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName,
   // Lookup the entry, lazily creating it if necessary.
   llvm::GlobalValue *Entry = GetGlobalValue(MangledName);
   if (Entry) {
-    if (WeakRefReferences.count(Entry)) {
+    if (WeakRefReferences.erase(Entry)) {
       if (D && !D->hasAttr<WeakAttr>())
         Entry->setLinkage(llvm::Function::ExternalLinkage);
-
-      WeakRefReferences.erase(Entry);
     }
 
     if (UnnamedAddr)
@@ -1473,10 +1479,10 @@ CodeGenModule::MaybeEmitGlobalStdInitializerListInitializer(const VarDecl *D,
   // Now clone the InitListExpr to initialize the array instead.
   // Incredible hack: we want to use the existing InitListExpr here, so we need
   // to tell it that it no longer initializes a std::initializer_list.
-  Expr *arrayInit = new (ctx) InitListExpr(ctx, init->getLBraceLoc(),
-                                    const_cast<InitListExpr*>(init)->getInits(),
-                                                   init->getNumInits(),
-                                                   init->getRBraceLoc());
+  ArrayRef<Expr*> Inits(const_cast<InitListExpr*>(init)->getInits(),
+                        init->getNumInits());
+  Expr *arrayInit = new (ctx) InitListExpr(ctx, init->getLBraceLoc(), Inits,
+                                           init->getRBraceLoc());
   arrayInit->setType(arrayType);
 
   if (!cleanups.empty())
@@ -1681,6 +1687,18 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
   // Emit the initializer function if necessary.
   if (NeedsGlobalCtor || NeedsGlobalDtor)
     EmitCXXGlobalVarDeclInitFunc(D, GV, NeedsGlobalCtor);
+
+  // If we are compiling with ASan, add metadata indicating dynamically
+  // initialized globals.
+  if (LangOpts.AddressSanitizer && NeedsGlobalCtor) {
+    llvm::Module &M = getModule();
+
+    llvm::NamedMDNode *DynamicInitializers =
+        M.getOrInsertNamedMetadata("llvm.asan.dynamically_initialized_globals");
+    llvm::Value *GlobalToAdd[] = { GV };
+    llvm::MDNode *ThisGlobal = llvm::MDNode::get(VMContext, GlobalToAdd);
+    DynamicInitializers->addOperand(ThisGlobal);
+  }
 
   // Emit global variable debug information.
   if (CGDebugInfo *DI = getModuleDebugInfo())
@@ -1987,7 +2005,7 @@ GetConstantCFStringEntry(llvm::StringMap<llvm::Constant*> &Map,
   IsUTF16 = true;
 
   SmallVector<UTF16, 128> ToBuf(NumBytes + 1); // +1 for ending nulls.
-  const UTF8 *FromPtr = (UTF8 *)String.data();
+  const UTF8 *FromPtr = (const UTF8 *)String.data();
   UTF16 *ToPtr = &ToBuf[0];
 
   (void)ConvertUTF8toUTF16(&FromPtr, FromPtr + NumBytes,
@@ -2636,7 +2654,7 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
     const std::string &S = getModule().getModuleInlineAsm();
     if (S.empty())
       getModule().setModuleInlineAsm(AsmString);
-    else if (*--S.end() == '\n')
+    else if (S.end()[-1] == '\n')
       getModule().setModuleInlineAsm(S + AsmString.str());
     else
       getModule().setModuleInlineAsm(S + '\n' + AsmString.str());

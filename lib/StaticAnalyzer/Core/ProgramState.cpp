@@ -22,10 +22,6 @@
 using namespace clang;
 using namespace ento;
 
-// Give the vtable for ConstraintManager somewhere to live.
-// FIXME: Move this elsewhere.
-ConstraintManager::~ConstraintManager() {}
-
 namespace clang { namespace  ento {
 /// Increments the number of times this state is referenced.
 
@@ -75,8 +71,8 @@ ProgramStateManager::ProgramStateManager(ASTContext &Ctx,
                                          StoreManagerCreator CreateSMgr,
                                          ConstraintManagerCreator CreateCMgr,
                                          llvm::BumpPtrAllocator &alloc,
-                                         SubEngine &SubEng)
-  : Eng(&SubEng), EnvMgr(alloc), GDMFactory(alloc),
+                                         SubEngine *SubEng)
+  : Eng(SubEng), EnvMgr(alloc), GDMFactory(alloc),
     svalBuilder(createSimpleSValBuilder(alloc, Ctx, *this)),
     CallEventMgr(new CallEventManager(alloc)), Alloc(alloc) {
   StoreMgr.reset((*CreateSMgr)(*this));
@@ -110,47 +106,25 @@ ProgramStateManager::removeDeadBindings(ProgramStateRef state,
                                                    SymReaper);
   NewState.setStore(newStore);
   SymReaper.setReapedStore(newStore);
-  
-  return getPersistentState(NewState);
-}
 
-ProgramStateRef ProgramStateManager::MarshalState(ProgramStateRef state,
-                                            const StackFrameContext *InitLoc) {
-  // make up an empty state for now.
-  ProgramState State(this,
-                EnvMgr.getInitialEnvironment(),
-                StoreMgr->getInitialStore(InitLoc),
-                GDMFactory.getEmptyMap());
-
-  return getPersistentState(State);
+  ProgramStateRef Result = getPersistentState(NewState);
+  return ConstraintMgr->removeDeadBindings(Result, SymReaper);
 }
 
 ProgramStateRef ProgramState::bindCompoundLiteral(const CompoundLiteralExpr *CL,
                                             const LocationContext *LC,
                                             SVal V) const {
   const StoreRef &newStore = 
-    getStateManager().StoreMgr->BindCompoundLiteral(getStore(), CL, LC, V);
+    getStateManager().StoreMgr->bindCompoundLiteral(getStore(), CL, LC, V);
   return makeWithStore(newStore);
 }
 
-ProgramStateRef ProgramState::bindDecl(const VarRegion* VR, SVal IVal) const {
-  const StoreRef &newStore =
-    getStateManager().StoreMgr->BindDecl(getStore(), VR, IVal);
-  return makeWithStore(newStore);
-}
-
-ProgramStateRef ProgramState::bindDeclWithNoInit(const VarRegion* VR) const {
-  const StoreRef &newStore =
-    getStateManager().StoreMgr->BindDeclWithNoInit(getStore(), VR);
-  return makeWithStore(newStore);
-}
-
-ProgramStateRef ProgramState::bindLoc(Loc LV, SVal V) const {
+ProgramStateRef ProgramState::bindLoc(Loc LV, SVal V, bool notifyChanges) const {
   ProgramStateManager &Mgr = getStateManager();
   ProgramStateRef newState = makeWithStore(Mgr.StoreMgr->Bind(getStore(), 
                                                              LV, V));
   const MemRegion *MR = LV.getAsRegion();
-  if (MR && Mgr.getOwningEngine())
+  if (MR && Mgr.getOwningEngine() && notifyChanges)
     return Mgr.getOwningEngine()->processRegionChange(newState, MR);
 
   return newState;
@@ -204,11 +178,12 @@ ProgramState::invalidateRegionsImpl(ArrayRef<const MemRegion *> Regions,
   return makeWithStore(newStore);
 }
 
-ProgramStateRef ProgramState::unbindLoc(Loc LV) const {
+ProgramStateRef ProgramState::killBinding(Loc LV) const {
   assert(!isa<loc::MemRegionVal>(LV) && "Use invalidateRegion instead.");
 
   Store OldStore = getStore();
-  const StoreRef &newStore = getStateManager().StoreMgr->Remove(OldStore, LV);
+  const StoreRef &newStore =
+    getStateManager().StoreMgr->killBinding(OldStore, LV);
 
   if (newStore.getStore() == OldStore)
     return this;
@@ -249,7 +224,9 @@ SVal ProgramState::getSVal(Loc location, QualType T) const {
   // about).
   if (!T.isNull()) {
     if (SymbolRef sym = V.getAsSymbol()) {
-      if (const llvm::APSInt *Int = getSymVal(sym)) {
+      if (const llvm::APSInt *Int = getStateManager()
+                                    .getConstraintManager()
+                                    .getSymVal(this, sym)) {
         // FIXME: Because we don't correctly model (yet) sign-extension
         // and truncation of symbolic values, we need to convert
         // the integer value to the correct signedness and bitwidth.
@@ -710,7 +687,9 @@ bool ProgramState::isTainted(SymbolRef Sym, TaintTagType Kind) const {
   bool Tainted = false;
   for (SymExpr::symbol_iterator SI = Sym->symbol_begin(), SE =Sym->symbol_end();
        SI != SE; ++SI) {
-    assert(isa<SymbolData>(*SI));
+    if (!isa<SymbolData>(*SI))
+      continue;
+    
     const TaintTagType *Tag = get<TaintMap>(*SI);
     Tainted = (Tag && *Tag == Kind);
 
@@ -737,40 +716,37 @@ bool ProgramState::isTainted(SymbolRef Sym, TaintTagType Kind) const {
 /// symbol to it's most likely type.
 namespace clang {
 namespace ento {
-struct DynamicTypeMap {};
-typedef llvm::ImmutableMap<SymbolRef, DynamicTypeInfo> DynamicTypeMapImpl;
+typedef llvm::ImmutableMap<const MemRegion *, DynamicTypeInfo> DynamicTypeMap;
 template<> struct ProgramStateTrait<DynamicTypeMap>
-    :  public ProgramStatePartialTrait<DynamicTypeMapImpl> {
+    : public ProgramStatePartialTrait<DynamicTypeMap> {
   static void *GDMIndex() { static int index; return &index; }
 };
 }}
 
 DynamicTypeInfo ProgramState::getDynamicTypeInfo(const MemRegion *Reg) const {
+  Reg = Reg->StripCasts();
+
+  // Look up the dynamic type in the GDM.
+  const DynamicTypeInfo *GDMType = get<DynamicTypeMap>(Reg);
+  if (GDMType)
+    return *GDMType;
+
+  // Otherwise, fall back to what we know about the region.
   if (const TypedRegion *TR = dyn_cast<TypedRegion>(Reg))
-    return DynamicTypeInfo(TR->getLocationType());
+    return DynamicTypeInfo(TR->getLocationType(), /*CanBeSubclass=*/false);
 
   if (const SymbolicRegion *SR = dyn_cast<SymbolicRegion>(Reg)) {
     SymbolRef Sym = SR->getSymbol();
-    // Lookup the dynamic type in the GDM.
-    const DynamicTypeInfo *GDMType = get<DynamicTypeMap>(Sym);
-    if (GDMType)
-      return *GDMType;
-
-    // Else, lookup the type at point of symbol creation.
-    return DynamicTypeInfo(Sym->getType(getStateManager().getContext()));
+    return DynamicTypeInfo(Sym->getType());
   }
+
   return DynamicTypeInfo();
 }
 
-ProgramStateRef ProgramState::addDynamicTypeInfo(const MemRegion *Reg,
+ProgramStateRef ProgramState::setDynamicTypeInfo(const MemRegion *Reg,
                                                  DynamicTypeInfo NewTy) const {
-  if (const SymbolicRegion *SR = dyn_cast<SymbolicRegion>(Reg)) {
-    SymbolRef Sym = SR->getSymbol();
-    // TODO: Instead of resetting the type info, check the old type info and
-    // merge and pick the most precise type.
-    ProgramStateRef NewState = set<DynamicTypeMap>(Sym, NewTy);
-    assert(NewState);
-    return NewState;
-  }
-  return this;
+  Reg = Reg->StripCasts();
+  ProgramStateRef NewState = set<DynamicTypeMap>(Reg, NewTy);
+  assert(NewState);
+  return NewState;
 }

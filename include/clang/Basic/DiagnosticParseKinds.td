@@ -18,6 +18,9 @@ def w_asm_qualifier_ignored : Warning<"ignored %0 qualifier on asm">,
 def warn_file_asm_volatile : Warning<
   "meaningless 'volatile' on asm outside function">, CatInlineAsm;
 
+def warn_unsupported_msasm : Warning<
+  "MS-style inline assembly is not supported">, InGroup<Microsoft>;
+
 let CategoryName = "Parse Issue" in {
 
 def ext_empty_translation_unit : Extension<
@@ -40,7 +43,10 @@ def warn_extra_semi_after_mem_fn_def : Warning<
   "extra ';' after member function definition">,
   InGroup<ExtraSemi>, DefaultIgnore;
 
-def ext_duplicate_declspec : Extension<"duplicate '%0' declaration specifier">;
+def ext_duplicate_declspec : ExtWarn<"duplicate '%0' declaration specifier">,
+  InGroup<DuplicateDeclSpecifier>;
+def warn_duplicate_declspec : Warning<"duplicate '%0' declaration specifier">,
+  InGroup<DuplicateDeclSpecifier>;
 def ext_plain_complex : ExtWarn<
   "plain '_Complex' requires a type specifier; assuming '_Complex double'">;
 def ext_integer_complex : Extension<
@@ -207,6 +213,17 @@ def err_expected_semi_after_static_assert : Error<
   "expected ';' after static_assert">;
 def err_expected_semi_for : Error<"expected ';' in 'for' statement specifier">;
 def err_expected_colon_after : Error<"expected ':' after %0">;
+def warn_missing_selector_name : Warning<
+  "%0 used as the name of the previous parameter rather than as part "
+  "of the selector">,
+  InGroup<DiagGroup<"missing-selector-name">>;
+def note_missing_selector_name : Note<
+  "introduce a parameter name to make %0 part of the selector">;
+def note_force_empty_selector_name : Note<
+  "or insert whitespace before ':' to use %0 as parameter name "
+  "and have an empty entry in the selector">;
+def note_missing_argument_name : Note<
+  "did you mean to use %0 as the selector name instead of %1">;
 def err_label_end_of_compound_statement : Error<
   "label at end of compound statement: expected statement">;
 def err_address_of_label_outside_fn : Error<
@@ -570,7 +587,7 @@ def err_expected_type_name_after_typename : Error<
   "expected an identifier or template-id after '::'">;
 def err_explicit_spec_non_template : Error<
   "explicit %select{specialization|instantiation}0 of non-template "
-  "%select{class|struct|union}1 %2">;
+  "%select{class|struct|union|interface}1 %2">;
   
 def err_default_template_template_parameter_not_template : Error<
   "default template argument for a template template parameter must be a class "
@@ -627,6 +644,11 @@ def ext_override_control_keyword : ExtWarn<
 def warn_cxx98_compat_override_control_keyword : Warning<
   "'%0' keyword is incompatible with C++98">,
   InGroup<CXX98Compat>, DefaultIgnore;
+def err_override_control_interface : Error<
+  "'%0' keyword not permitted with interface types">;
+
+def err_access_specifier_interface : Error<
+  "interface types cannot specify '%select{private|protected}0' access">;
 
 def err_duplicate_virt_specifier : Error<
   "class member already marked '%0'">;
@@ -676,6 +698,10 @@ def err_availability_redundant : Error<
 def warn_availability_and_unavailable : Warning<
   "'unavailable' availability overrides all other availability information">,
   InGroup<Availability>;
+
+// Type safety attributes
+def err_type_safety_unknown_flag : Error<
+  "invalid comparison flag %0; use 'layout_compatible' or 'must_be_null'">;
 
 // Language specific pragmas
 // - Generic warnings

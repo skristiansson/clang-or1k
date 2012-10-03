@@ -25,7 +25,8 @@ using namespace ento;
 
 namespace {
 class DynamicTypePropagation:
-    public Checker< check::PostCall,
+    public Checker< check::PreCall,
+                    check::PostCall,
                     check::PostStmt<ImplicitCastExpr> > {
   const ObjCObjectType *getObjectTypeForAllocAndNew(const ObjCMessageExpr *MsgE,
                                                     CheckerContext &C) const;
@@ -34,9 +35,68 @@ class DynamicTypePropagation:
   const ObjCObjectPointerType *getBetterObjCType(const Expr *CastE,
                                                  CheckerContext &C) const;
 public:
+  void checkPreCall(const CallEvent &Call, CheckerContext &C) const;
   void checkPostCall(const CallEvent &Call, CheckerContext &C) const;
   void checkPostStmt(const ImplicitCastExpr *CastE, CheckerContext &C) const;
 };
+}
+
+static void recordFixedType(const MemRegion *Region, const CXXMethodDecl *MD,
+                            CheckerContext &C) {
+  assert(Region);
+  assert(MD);
+
+  ASTContext &Ctx = C.getASTContext();
+  QualType Ty = Ctx.getPointerType(Ctx.getRecordType(MD->getParent()));
+
+  ProgramStateRef State = C.getState();
+  State = State->setDynamicTypeInfo(Region, Ty, /*CanBeSubclass=*/false);
+  C.addTransition(State);
+  return;
+}
+
+void DynamicTypePropagation::checkPreCall(const CallEvent &Call,
+                                          CheckerContext &C) const {
+  if (const CXXConstructorCall *Ctor = dyn_cast<CXXConstructorCall>(&Call)) {
+    // C++11 [class.cdtor]p4: When a virtual function is called directly or
+    //   indirectly from a constructor or from a destructor, including during
+    //   the construction or destruction of the class’s non-static data members,
+    //   and the object to which the call applies is the object under
+    //   construction or destruction, the function called is the final overrider
+    //   in the constructor's or destructor's class and not one overriding it in
+    //   a more-derived class.
+
+    switch (Ctor->getOriginExpr()->getConstructionKind()) {
+    case CXXConstructExpr::CK_Complete:
+    case CXXConstructExpr::CK_Delegating:
+      // No additional type info necessary.
+      return;
+    case CXXConstructExpr::CK_NonVirtualBase:
+    case CXXConstructExpr::CK_VirtualBase:
+      if (const MemRegion *Target = Ctor->getCXXThisVal().getAsRegion())
+        recordFixedType(Target, Ctor->getDecl(), C);
+      return;
+    }
+
+    return;
+  }
+
+  if (const CXXDestructorCall *Dtor = dyn_cast<CXXDestructorCall>(&Call)) {
+    // C++11 [class.cdtor]p4 (see above)
+    if (!Dtor->isBaseDestructor())
+      return;
+
+    const MemRegion *Target = Dtor->getCXXThisVal().getAsRegion();
+    if (!Target)
+      return;
+
+    const Decl *D = Dtor->getDecl();
+    if (!D)
+      return;
+
+    recordFixedType(Target, cast<CXXDestructorDecl>(D), C);
+    return;
+  }
 }
 
 void DynamicTypePropagation::checkPostCall(const CallEvent &Call,
@@ -68,7 +128,7 @@ void DynamicTypePropagation::checkPostCall(const CallEvent &Call,
         return;
       QualType DynResTy =
                  C.getASTContext().getObjCObjectPointerType(QualType(ObjTy, 0));
-      C.addTransition(State->addDynamicTypeInfo(RetReg, DynResTy));
+      C.addTransition(State->setDynamicTypeInfo(RetReg, DynResTy, false));
       break;
     }
     case OMF_init: {
@@ -78,9 +138,34 @@ void DynamicTypePropagation::checkPostCall(const CallEvent &Call,
       if (!RecReg)
         return;
       DynamicTypeInfo RecDynType = State->getDynamicTypeInfo(RecReg);
-      C.addTransition(State->addDynamicTypeInfo(RetReg, RecDynType));
+      C.addTransition(State->setDynamicTypeInfo(RetReg, RecDynType));
       break;
     }
+    }
+
+    return;
+  }
+
+  if (const CXXConstructorCall *Ctor = dyn_cast<CXXConstructorCall>(&Call)) {
+    // We may need to undo the effects of our pre-call check.
+    switch (Ctor->getOriginExpr()->getConstructionKind()) {
+    case CXXConstructExpr::CK_Complete:
+    case CXXConstructExpr::CK_Delegating:
+      // No additional work necessary.
+      // Note: This will leave behind the actual type of the object for
+      // complete constructors, but arguably that's a good thing, since it
+      // means the dynamic type info will be correct even for objects
+      // constructed with operator new.
+      return;
+    case CXXConstructExpr::CK_NonVirtualBase:
+    case CXXConstructExpr::CK_VirtualBase:
+      if (const MemRegion *Target = Ctor->getCXXThisVal().getAsRegion()) {
+        // We just finished a base constructor. Now we can use the subclass's
+        // type when resolving virtual calls.
+        const Decl *D = C.getLocationContext()->getDecl();
+        recordFixedType(Target, cast<CXXConstructorDecl>(D), C);
+      }
+      return;
     }
   }
 }
@@ -98,7 +183,7 @@ void DynamicTypePropagation::checkPostStmt(const ImplicitCastExpr *CastE,
   case CK_BitCast:
     // Only handle ObjCObjects for now.
     if (const Type *NewTy = getBetterObjCType(CastE, C))
-      C.addTransition(C.getState()->addDynamicTypeInfo(ToR, QualType(NewTy,0)));
+      C.addTransition(C.getState()->setDynamicTypeInfo(ToR, QualType(NewTy,0)));
     break;
   }
   return;
@@ -125,7 +210,7 @@ DynamicTypePropagation::getObjectTypeForAllocAndNew(const ObjCMessageExpr *MsgE,
 
   RecE= RecE->IgnoreParenImpCasts();
   if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(RecE)) {
-    const StackFrameContext *SFCtx = C.getCurrentStackFrame();
+    const StackFrameContext *SFCtx = C.getStackFrame();
     // Are we calling [self alloc]? If this is self, get the type of the
     // enclosing ObjC class.
     if (DRE->getDecl() == SFCtx->getSelfDecl()) {

@@ -687,7 +687,13 @@ private:
   /// Objective-C protocols.
   std::deque<Decl *> InterestingDecls;
 
-  /// \brief The set of redeclarable declaraations that have been deserialized
+  /// \brief Redecls that have been added to the AST
+  ///
+  /// Redecls that are deserialized but not in RedeclsAddedToAST must
+  /// not be passed to the ASTConsumers, even if they are InterestignDecls.
+  llvm::SmallPtrSet<Decl *, 16> RedeclsAddedToAST;
+
+  /// \brief The set of redeclarable declarations that have been deserialized
   /// since the last time the declaration chains were linked.
   llvm::SmallPtrSet<Decl *, 16> RedeclsDeserialized;
   
@@ -758,8 +764,8 @@ private:
     ASTReader &Reader;
     enum ReadingKind PrevKind;
 
-    ReadingKindTracker(const ReadingKindTracker&); // do not implement
-    ReadingKindTracker &operator=(const ReadingKindTracker&);// do not implement
+    ReadingKindTracker(const ReadingKindTracker &) LLVM_DELETED_FUNCTION;
+    void operator=(const ReadingKindTracker &) LLVM_DELETED_FUNCTION;
 
   public:
     ReadingKindTracker(enum ReadingKind newKind, ASTReader &reader)
@@ -836,22 +842,90 @@ private:
 
   /// \brief Find the next module that contains entities and return the ID
   /// of the first entry.
-  /// \arg SLocMapI points at a chunk of a module that contains no
+  ///
+  /// \param SLocMapI points at a chunk of a module that contains no
   /// preprocessed entities or the entities it contains are not the
   /// ones we are looking for.
   serialization::PreprocessedEntityID
     findNextPreprocessedEntity(
                         GlobalSLocOffsetMapType::const_iterator SLocMapI) const;
 
-  /// \brief Returns (ModuleFile, Local index) pair for \arg GlobalIndex of a
+  /// \brief Returns (ModuleFile, Local index) pair for \p GlobalIndex of a
   /// preprocessed entity.
   std::pair<ModuleFile *, unsigned>
     getModulePreprocessedEntity(unsigned GlobalIndex);
+
+  /// \brief Returns (begin, end) pair for the preprocessed entities of a
+  /// particular module.
+  std::pair<PreprocessingRecord::iterator, PreprocessingRecord::iterator>
+    getModulePreprocessedEntities(ModuleFile &Mod) const;
+
+  class ModuleDeclIterator {
+    ASTReader *Reader;
+    ModuleFile *Mod;
+    const serialization::LocalDeclID *Pos;
+
+  public:
+    typedef const Decl *value_type;
+    typedef value_type&         reference;
+    typedef value_type*         pointer;
+
+    ModuleDeclIterator() : Reader(0), Mod(0), Pos(0) { }
+
+    ModuleDeclIterator(ASTReader *Reader, ModuleFile *Mod,
+                       const serialization::LocalDeclID *Pos)
+      : Reader(Reader), Mod(Mod), Pos(Pos) { }
+
+    value_type operator*() const {
+      return Reader->GetDecl(Reader->getGlobalDeclID(*Mod, *Pos));
+    }
+
+    ModuleDeclIterator &operator++() {
+      ++Pos;
+      return *this;
+    }
+
+    ModuleDeclIterator operator++(int) {
+      ModuleDeclIterator Prev(*this);
+      ++Pos;
+      return Prev;
+    }
+
+    ModuleDeclIterator &operator--() {
+      --Pos;
+      return *this;
+    }
+
+    ModuleDeclIterator operator--(int) {
+      ModuleDeclIterator Prev(*this);
+      --Pos;
+      return Prev;
+    }
+
+    friend bool operator==(const ModuleDeclIterator &LHS,
+                           const ModuleDeclIterator &RHS) {
+      assert(LHS.Reader == RHS.Reader && LHS.Mod == RHS.Mod);
+      return LHS.Pos == RHS.Pos;
+    }
+
+    friend bool operator!=(const ModuleDeclIterator &LHS,
+                           const ModuleDeclIterator &RHS) {
+      assert(LHS.Reader == RHS.Reader && LHS.Mod == RHS.Mod);
+      return LHS.Pos != RHS.Pos;
+    }
+  };
+
+  std::pair<ModuleDeclIterator, ModuleDeclIterator>
+    getModuleFileLevelDecls(ModuleFile &Mod);
 
   void PassInterestingDeclsToConsumer();
   void PassInterestingDeclToConsumer(Decl *D);
 
   void finishPendingActions();
+
+  /// \brief Whether D needs to be instantiated, i.e. whether an instantiation
+  /// for D does not exist yet.
+  bool needPendingInstantiation(ValueDecl* D) const;
 
   /// \brief Produce an error diagnostic and return true.
   ///
@@ -861,8 +935,8 @@ private:
   void Error(unsigned DiagID, StringRef Arg1 = StringRef(),
              StringRef Arg2 = StringRef());
 
-  ASTReader(const ASTReader&); // do not implement
-  ASTReader &operator=(const ASTReader &); // do not implement
+  ASTReader(const ASTReader &) LLVM_DELETED_FUNCTION;
+  void operator=(const ASTReader &) LLVM_DELETED_FUNCTION;
 public:
   /// \brief Load the AST file and validate its contents against the given
   /// Preprocessor.
@@ -968,12 +1042,12 @@ public:
   virtual PreprocessedEntity *ReadPreprocessedEntity(unsigned Index);
 
   /// \brief Returns a pair of [Begin, End) indices of preallocated
-  /// preprocessed entities that \arg Range encompasses.
+  /// preprocessed entities that \p Range encompasses.
   virtual std::pair<unsigned, unsigned>
       findPreprocessedEntitiesInRange(SourceRange Range);
 
   /// \brief Optionally returns true or false if the preallocated preprocessed
-  /// entity with index \arg Index came from file \arg FID.
+  /// entity with index \p Index came from file \p FID.
   virtual llvm::Optional<bool> isPreprocessedEntityInFileID(unsigned Index,
                                                             FileID FID);
 
@@ -1065,17 +1139,17 @@ public:
 
   /// \brief Map from a local declaration ID within a given module to a
   /// global declaration ID.
-  serialization::DeclID getGlobalDeclID(ModuleFile &F, unsigned LocalID) const;
+  serialization::DeclID getGlobalDeclID(ModuleFile &F,
+                                      serialization::LocalDeclID LocalID) const;
 
-  /// \brief Returns true if global DeclID \arg ID originated from module
-  /// \arg M.
+  /// \brief Returns true if global DeclID \p ID originated from module \p M.
   bool isDeclIDFromModule(serialization::GlobalDeclID ID, ModuleFile &M) const;
 
   /// \brief Retrieve the module file that owns the given declaration, or NULL
   /// if the declaration is not from a module file.
   ModuleFile *getOwningModuleFile(Decl *D);
   
-  /// \brief Returns the source location for the decl \arg ID.
+  /// \brief Returns the source location for the decl \p ID.
   SourceLocation getSourceLocationForDeclID(serialization::GlobalDeclID ID);
 
   /// \brief Resolve a declaration ID into a declaration, potentially
@@ -1172,7 +1246,7 @@ public:
                                         SmallVectorImpl<Decl*> &Decls);
 
   /// \brief Get the decls that are contained in a file in the Offset/Length
-  /// range. \arg Length can be 0 to indicate a point at \arg Offset instead of
+  /// range. \p Length can be 0 to indicate a point at \p Offset instead of
   /// a range.
   virtual void FindFileRegionDecls(FileID File, unsigned Offset,unsigned Length,
                                    SmallVectorImpl<Decl *> &Decls);

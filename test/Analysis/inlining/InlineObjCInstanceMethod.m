@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -analyze -analyzer-checker=core -analyzer-ipa=dynamic -verify %s
+// RUN: %clang --analyze -Xanalyzer -analyzer-checker=core -Xclang -verify %s
 
 #include "InlineObjCInstanceMethod.h"
 

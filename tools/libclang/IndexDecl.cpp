@@ -10,6 +10,7 @@
 #include "IndexingContext.h"
 
 #include "clang/AST/DeclVisitor.h"
+#include "clang/Basic/Module.h"
 
 using namespace clang;
 using namespace cxindex;
@@ -110,7 +111,7 @@ public:
     return true;
   }
 
-  bool VisitTypedefDecl(TypedefNameDecl *D) {
+  bool VisitTypedefNameDecl(TypedefNameDecl *D) {
     IndexCtx.handleTypedefName(D);
     IndexCtx.indexTypeSourceInfo(D->getTypeSourceInfo(), D);
     return true;
@@ -305,6 +306,14 @@ public:
     IndexCtx.indexTypeSourceInfo(D->getTemplatedDecl()->getTypeSourceInfo(), D);
     return true;
   }
+
+  bool VisitImportDecl(ImportDecl *D) {
+    Module *Imported = D->getImportedModule();
+    if (Imported)
+      IndexCtx.importedModule(D->getLocation(), Imported->getFullModuleName(),
+                              /*isIncludeDirective=*/false, Imported);
+    return true;
+  }
 };
 
 } // anonymous namespace
@@ -325,7 +334,7 @@ void IndexingContext::indexDeclContext(const DeclContext *DC) {
   }
 }
 
-void IndexingContext::indexTopLevelDecl(Decl *D) {
+void IndexingContext::indexTopLevelDecl(const Decl *D) {
   if (isNotFromSourceFile(D->getLocation()))
     return;
 

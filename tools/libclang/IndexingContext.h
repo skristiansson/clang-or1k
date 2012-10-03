@@ -251,8 +251,8 @@ class AttrListInfo {
   SmallVector<CXIdxAttrInfo *, 2> CXAttrs;
   unsigned ref_cnt;
 
-  AttrListInfo(const AttrListInfo&); // DO NOT IMPLEMENT
-  void operator=(const AttrListInfo&); // DO NOT IMPLEMENT
+  AttrListInfo(const AttrListInfo &) LLVM_DELETED_FUNCTION;
+  void operator=(const AttrListInfo &) LLVM_DELETED_FUNCTION;
 public:
   AttrListInfo(const Decl *D, IndexingContext &IdxCtx);
 
@@ -370,6 +370,8 @@ public:
     return IndexOptions & CXIndexOpt_IndexImplicitTemplateInstantiations;
   }
 
+  static bool isFunctionLocalDecl(const Decl *D);
+
   bool shouldAbort();
 
   bool hasDiagnosticCallback() const { return CB.diagnostic; }
@@ -379,6 +381,10 @@ public:
   void ppIncludedFile(SourceLocation hashLoc,
                       StringRef filename, const FileEntry *File,
                       bool isImport, bool isAngled);
+
+  void importedModule(SourceLocation Loc,
+                      StringRef name, bool isIncludeDirective,
+                      const Module *module);
 
   void startedTranslationUnit();
 
@@ -451,7 +457,7 @@ public:
 
   bool isNotFromSourceFile(SourceLocation Loc) const;
 
-  void indexTopLevelDecl(Decl *D);
+  void indexTopLevelDecl(const Decl *D);
   void indexTUDeclsInObjCContainer();
   void indexDeclGroupRef(DeclGroupRef DG);
 

@@ -13,6 +13,7 @@
 #include "clang/Sema/SemaInternal.h"
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/Scope.h"
+#include "clang/Sema/ScopeInfo.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
@@ -656,7 +657,7 @@ Sema::BuildMemberReferenceExpr(Expr *Base, QualType BaseType,
     }
 
     if (Result.get())
-      return move(Result);
+      return Result;
 
     // LookupMemberExpr can modify Base, and thus change BaseType
     BaseType = Base->getType();
@@ -1137,7 +1138,7 @@ Sema::LookupMemberExpr(LookupResult &R, ExprResult &BaseExpr,
         goto fail;
       // There's an implicit 'isa' ivar on all objects.
       // But we only actually find it this way on objects of type 'id',
-      // apparently.ghjg
+      // apparently.
       if (OTy->isObjCId() && Member->isStr("isa")) {
         Diag(MemberLoc, diag::warn_objc_isa_use);
         return Owned(new (Context) ObjCIsaExpr(BaseExpr.take(), IsArrow, MemberLoc,
@@ -1272,9 +1273,23 @@ Sema::LookupMemberExpr(LookupResult &R, ExprResult &BaseExpr,
       if (warn)
         Diag(MemberLoc, diag::warn_direct_ivar_access) << IV->getDeclName();
     }
-    return Owned(new (Context) ObjCIvarRefExpr(IV, IV->getType(),
-                                               MemberLoc, BaseExpr.take(),
-                                               IsArrow));
+
+    ObjCIvarRefExpr *Result = new (Context) ObjCIvarRefExpr(IV, IV->getType(),
+                                                            MemberLoc,
+                                                            BaseExpr.take(),
+                                                            IsArrow);
+
+    if (getLangOpts().ObjCAutoRefCount) {
+      if (IV->getType().getObjCLifetime() == Qualifiers::OCL_Weak) {
+        DiagnosticsEngine::Level Level =
+          Diags.getDiagnosticLevel(diag::warn_arc_repeated_use_of_weak,
+                                   MemberLoc);
+        if (Level != DiagnosticsEngine::Ignored)
+          getCurFunction()->recordUseOfWeak(Result);
+      }
+    }
+
+    return Owned(Result);
   }
 
   // Objective-C property access.
@@ -1550,7 +1565,7 @@ ExprResult Sema::ActOnMemberAccessExpr(Scope *S, Expr *Base,
           Id.getKind() == UnqualifiedId::IK_DestructorName)
         return DiagnoseDtorReference(NameInfo.getLoc(), Result.get());
 
-      return move(Result);
+      return Result;
     }
 
     ActOnMemberAccessExtraArgs ExtraArgs = {S, Id, ObjCImpDecl, HasTrailingLParen};
@@ -1560,7 +1575,7 @@ ExprResult Sema::ActOnMemberAccessExpr(Scope *S, Expr *Base,
                                       false, &ExtraArgs);
   }
 
-  return move(Result);
+  return Result;
 }
 
 static ExprResult

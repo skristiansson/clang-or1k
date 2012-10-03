@@ -37,8 +37,6 @@ def triple_EQ : Joined<"-triple=">, Alias<triple>;
 
 def analysis_UnoptimizedCFG : Flag<"-unoptimized-cfg">,
   HelpText<"Generate unoptimized CFGs for all analyses">;
-def analysis_CFGAddImplicitDtors : Flag<"-cfg-add-implicit-dtors">,
-  HelpText<"Add C++ implicit destructors to CFGs for all analyses">;
 
 def analyzer_store : Separate<"-analyzer-store">,
   HelpText<"Source Code Analysis - Abstract Memory Store Models">;
@@ -118,6 +116,9 @@ def analyzer_disable_checker_EQ : Joined<"-analyzer-disable-checker=">,
 
 def analyzer_checker_help : Flag<"-analyzer-checker-help">,
   HelpText<"Display the list of analyzer checkers that are available">;
+
+def analyzer_config : Separate<"-analyzer-config">,
+  HelpText<"Choose analyzer options to enable">;
 
 //===----------------------------------------------------------------------===//
 // Migrator Options
@@ -388,6 +389,8 @@ def main_file_name : Separate<"-main-file-name">,
   HelpText<"Main file name to use for debug info">;
 def fno_signed_char : Flag<"-fno-signed-char">,
   HelpText<"Char is unsigned">;
+def fno_wchar : Flag<"-fno-wchar">,
+  HelpText<"Disable C++ builtin type wchar_t">;
 def fconstant_string_class : Separate<"-fconstant-string-class">,
   MetaVarName<"<class name>">,
   HelpText<"Specify the class to use for constant Objective-C string objects.">;
@@ -415,6 +418,8 @@ def static_define : Flag<"-static-define">,
   HelpText<"Should __STATIC__ be defined">;
 def stack_protector : Separate<"-stack-protector">,
   HelpText<"Enable stack protectors">;
+def stack_protector_buffer_size : Separate<"-stack-protector-buffer-size">,
+  HelpText<"Lower bound for a buffer to be considered for stack protection">;
 def fvisibility : Separate<"-fvisibility">,
   HelpText<"Default symbol visibility">;
 def ftemplate_depth : Separate<"-ftemplate-depth">,

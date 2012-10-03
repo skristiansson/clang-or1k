@@ -512,8 +512,7 @@ static void ValidateCommentXML(const char *Str,
 #endif
 }
 
-static void PrintCursorComments(CXTranslationUnit TU,
-                                CXCursor Cursor,
+static void PrintCursorComments(CXCursor Cursor,
                                 CommentXMLValidationData *ValidationData) {
   {
     CXString RawComment;
@@ -543,7 +542,7 @@ static void PrintCursorComments(CXTranslationUnit TU,
                                         clang_FullComment_getAsHTML(Comment));
       {
         CXString XML;
-        XML = clang_FullComment_getAsXML(TU, Comment);
+        XML = clang_FullComment_getAsXML(Comment);
         PrintCXStringWithPrefix("FullCommentAsXML", XML);
         ValidateCommentXML(clang_getCString(XML), ValidationData);
         clang_disposeString(XML);
@@ -552,6 +551,19 @@ static void PrintCursorComments(CXTranslationUnit TU,
       DumpCXComment(Comment);
     }
   }
+}
+
+typedef struct {
+  unsigned line;
+  unsigned col;
+} LineCol;
+
+static int lineCol_cmp(const void *p1, const void *p2) {
+  const LineCol *lhs = p1;
+  const LineCol *rhs = p2;
+  if (lhs->line != rhs->line)
+    return (int)lhs->line - (int)rhs->line;
+  return (int)lhs->col - (int)rhs->col;
 }
 
 static void PrintCursor(CXCursor Cursor,
@@ -718,13 +730,21 @@ static void PrintCursor(CXCursor Cursor,
     clang_getOverriddenCursors(Cursor, &overridden, &num_overridden);
     if (num_overridden) {      
       unsigned I;
+      LineCol lineCols[50];
+      assert(num_overridden <= 50);
       printf(" [Overrides ");
       for (I = 0; I != num_overridden; ++I) {
         CXSourceLocation Loc = clang_getCursorLocation(overridden[I]);
         clang_getSpellingLocation(Loc, 0, &line, &column, 0);
+        lineCols[I].line = line;
+        lineCols[I].col = column;
+      }
+      /* Make the order of the override list deterministic. */
+      qsort(lineCols, num_overridden, sizeof(LineCol), lineCol_cmp);
+      for (I = 0; I != num_overridden; ++I) {
         if (I)
           printf(", ");
-        printf("@%d:%d", line, column);
+        printf("@%d:%d", lineCols[I].line, lineCols[I].col);
       }
       printf("]");
       clang_disposeOverriddenCursors(overridden);
@@ -760,7 +780,7 @@ static void PrintCursor(CXCursor Cursor,
         PrintRange(RefNameRange, "RefName");
     }
 
-    PrintCursorComments(TU, Cursor, ValidationData);
+    PrintCursorComments(Cursor, ValidationData);
   }
 }
 
@@ -2186,6 +2206,7 @@ static const char *getEntityKindString(CXIdxEntityKind kind) {
   case CXIdxEntity_CXXDestructor: return "destructor";
   case CXIdxEntity_CXXConversionFunction: return "conversion-func";
   case CXIdxEntity_CXXTypeAlias: return "type-alias";
+  case CXIdxEntity_CXXInterface: return "c++-__interface";
   }
   assert(0 && "Garbage entity kind");
   return 0;
@@ -2328,6 +2349,24 @@ static CXIdxClientFile index_ppIncludedFile(CXClientData client_data,
   return (CXIdxClientFile)info->file;
 }
 
+static CXIdxClientFile index_importedASTFile(CXClientData client_data,
+                                         const CXIdxImportedASTFileInfo *info) {
+  IndexData *index_data;
+  index_data = (IndexData *)client_data;
+  printCheck(index_data);
+
+  printf("[importedASTFile]: ");
+  printCXIndexFile((CXIdxClientFile)info->file);
+  printf(" | loc: ");
+  printCXIndexLoc(info->loc, client_data);
+  printf(" | module name: \"%s\"", info->moduleName);
+  printf(" | source name: \"%s\"", info->sourceName);
+  printf(" | isModule: %d | isIncludeDirective: %d\n",
+         info->isModule, info->isIncludeDirective);
+
+  return (CXIdxClientFile)info->file;
+}
+
 static CXIdxClientContainer index_startedTranslationUnit(CXClientData client_data,
                                                    void *reserved) {
   IndexData *index_data;
@@ -2458,7 +2497,7 @@ static IndexerCallbacks IndexCB = {
   index_diagnostic,
   index_enteredMainFile,
   index_ppIncludedFile,
-  0, /*importedASTFile*/
+  index_importedASTFile,
   index_startedTranslationUnit,
   index_indexDeclaration,
   index_indexEntityReference
@@ -2513,7 +2552,8 @@ static int index_file(int argc, const char **argv) {
   idxAction = clang_IndexAction_create(Idx);
   result = clang_indexSourceFile(idxAction, &index_data,
                                  &IndexCB,sizeof(IndexCB), index_opts,
-                                 0, argv, argc, 0, 0, 0, 0);
+                                 0, argv, argc, 0, 0, 0,
+                                 getDefaultParsingOptions());
   if (index_data.fail_for_error)
     result = -1;
 
@@ -3355,11 +3395,11 @@ void thread_runner(void *client_data_v) {
 }
 
 int main(int argc, const char **argv) {
+  thread_info client_data;
+
 #ifdef CLANG_HAVE_LIBXML
   LIBXML_TEST_VERSION
 #endif
-
-  thread_info client_data;
 
   if (getenv("CINDEXTEST_NOTHREADS"))
     return cindextest_main(argc, argv);

@@ -4,7 +4,6 @@ clang_tablegen(Checkers.inc -gen-clang-sa-checkers
   TARGET ClangSACheckers)
 
 add_clang_library(clangStaticAnalyzerCheckers
-  AdjustedReturnValueChecker.cpp
   AnalyzerStatsChecker.cpp
   ArrayBoundChecker.cpp
   ArrayBoundCheckerV2.cpp
@@ -25,6 +24,7 @@ add_clang_library(clangStaticAnalyzerCheckers
   ChrootChecker.cpp
   ClangCheckers.cpp
   CommonBugCategories.cpp
+  DirectIvarAssignment.cpp
   DeadStoresChecker.cpp
   DebugCheckers.cpp
   DereferenceChecker.cpp
@@ -34,6 +34,7 @@ add_clang_library(clangStaticAnalyzerCheckers
   FixedAddressChecker.cpp
   GenericTaintChecker.cpp
   IdempotentOperationChecker.cpp
+  IvarInvalidationChecker.cpp
   LLVMConventionsChecker.cpp
   MacOSKeychainAPIChecker.cpp
   MacOSXAPIChecker.cpp

@@ -41,7 +41,7 @@ ExternalHeaderFileInfoSource::~ExternalHeaderFileInfoSource() {}
 HeaderSearch::HeaderSearch(FileManager &FM, DiagnosticsEngine &Diags,
                            const LangOptions &LangOpts, 
                            const TargetInfo *Target)
-  : FileMgr(FM), Diags(Diags), FrameworkMap(64), 
+  : FileMgr(FM), FrameworkMap(64),
     ModMap(FileMgr, *Diags.getClient(), LangOpts, Target)
 {
   AngledDirIdx = 0;
@@ -442,11 +442,19 @@ const FileEntry *HeaderSearch::LookupFile(
       // Leave CurDir unset.
       // This file is a system header or C++ unfriendly if the old file is.
       //
-      // Note that the temporary 'DirInfo' is required here, as either call to
-      // getFileInfo could resize the vector and we don't want to rely on order
-      // of evaluation.
-      unsigned DirInfo = getFileInfo(CurFileEnt).DirInfo;
-      getFileInfo(FE).DirInfo = DirInfo;
+      // Note that we only use one of FromHFI/ToHFI at once, due to potential
+      // reallocation of the underlying vector potentially making the first
+      // reference binding dangling.
+      HeaderFileInfo &FromHFI = getFileInfo(CurFileEnt);
+      unsigned DirInfo = FromHFI.DirInfo;
+      bool IndexHeaderMapHeader = FromHFI.IndexHeaderMapHeader;
+      StringRef Framework = FromHFI.Framework;
+
+      HeaderFileInfo &ToHFI = getFileInfo(FE);
+      ToHFI.DirInfo = DirInfo;
+      ToHFI.IndexHeaderMapHeader = IndexHeaderMapHeader;
+      ToHFI.Framework = Framework;
+
       if (SearchPath != NULL) {
         StringRef SearchPathRef(CurFileEnt->getDir()->getName());
         SearchPath->clear();
@@ -897,7 +905,20 @@ Module *HeaderSearch::loadFrameworkModule(StringRef Name,
   SubmodulePath.push_back(Name);
   
   // Walk the directory structure to find any enclosing frameworks.
+#ifdef LLVM_ON_UNIX
+  // Note: as an egregious but useful hack we use the real path here, because
+  // frameworks moving from top-level frameworks to embedded frameworks tend
+  // to be symlinked from the top-level location to the embedded location,
+  // and we need to resolve lookups as if we had found the embedded location.
+  char RealDirName[PATH_MAX];
+  StringRef DirName;
+  if (realpath(Dir->getName(), RealDirName))
+    DirName = RealDirName;
+  else
+    DirName = Dir->getName();
+#else
   StringRef DirName = Dir->getName();
+#endif
   do {
     // Get the parent directory name.
     DirName = llvm::sys::path::parent_path(DirName);

@@ -350,8 +350,8 @@ ParsedType Sema::getTypeName(IdentifierInfo &II, SourceLocation NameLoc,
 /// isTagName() - This method is called *for error recovery purposes only*
 /// to determine if the specified name is a valid tag name ("struct foo").  If
 /// so, this returns the TST for the tag corresponding to it (TST_enum,
-/// TST_union, TST_struct, TST_class).  This is used to diagnose cases in C
-/// where the user forgot to specify the tag.
+/// TST_union, TST_struct, TST_interface, TST_class).  This is used to diagnose
+/// cases in C where the user forgot to specify the tag.
 DeclSpec::TST Sema::isTagName(IdentifierInfo &II, Scope *S) {
   // Do a tag name lookup in this scope.
   LookupResult R(*this, &II, SourceLocation(), LookupTagName);
@@ -361,6 +361,7 @@ DeclSpec::TST Sema::isTagName(IdentifierInfo &II, Scope *S) {
     if (const TagDecl *TD = R.getAsSingle<TagDecl>()) {
       switch (TD->getTagKind()) {
       case TTK_Struct: return DeclSpec::TST_struct;
+      case TTK_Interface: return DeclSpec::TST_interface;
       case TTK_Union:  return DeclSpec::TST_union;
       case TTK_Class:  return DeclSpec::TST_class;
       case TTK_Enum:   return DeclSpec::TST_enum;
@@ -517,9 +518,9 @@ static bool isTagTypeWithMissingTag(Sema &SemaRef, LookupResult &Result,
                                     Scope *S, CXXScopeSpec &SS,
                                     IdentifierInfo *&Name,
                                     SourceLocation NameLoc) {
-  Result.clear(Sema::LookupTagName);
-  SemaRef.LookupParsedName(Result, S, &SS);
-  if (TagDecl *Tag = Result.getAsSingle<TagDecl>()) {
+  LookupResult R(SemaRef, Name, NameLoc, Sema::LookupTagName);
+  SemaRef.LookupParsedName(R, S, &SS);
+  if (TagDecl *Tag = R.getAsSingle<TagDecl>()) {
     const char *TagName = 0;
     const char *FixItTagName = 0;
     switch (Tag->getTagKind()) {
@@ -538,6 +539,11 @@ static bool isTagTypeWithMissingTag(Sema &SemaRef, LookupResult &Result,
         FixItTagName = "struct ";
         break;
 
+      case TTK_Interface:
+        TagName = "__interface";
+        FixItTagName = "__interface ";
+        break;
+
       case TTK_Union:
         TagName = "union";
         FixItTagName = "union ";
@@ -548,25 +554,42 @@ static bool isTagTypeWithMissingTag(Sema &SemaRef, LookupResult &Result,
       << Name << TagName << SemaRef.getLangOpts().CPlusPlus
       << FixItHint::CreateInsertion(NameLoc, FixItTagName);
 
-    LookupResult R(SemaRef, Name, NameLoc, Sema::LookupOrdinaryName);
-    if (SemaRef.LookupParsedName(R, S, &SS)) {
-      for (LookupResult::iterator I = R.begin(), IEnd = R.end();
-           I != IEnd; ++I)
-        SemaRef.Diag((*I)->getLocation(), diag::note_decl_hiding_tag_type)
-          << Name << TagName;
-    }
+    for (LookupResult::iterator I = Result.begin(), IEnd = Result.end();
+         I != IEnd; ++I)
+      SemaRef.Diag((*I)->getLocation(), diag::note_decl_hiding_tag_type)
+        << Name << TagName;
+
+    // Replace lookup results with just the tag decl.
+    Result.clear(Sema::LookupTagName);
+    SemaRef.LookupParsedName(Result, S, &SS);
     return true;
   }
 
-  Result.clear(Sema::LookupOrdinaryName);
   return false;
+}
+
+/// Build a ParsedType for a simple-type-specifier with a nested-name-specifier.
+static ParsedType buildNestedType(Sema &S, CXXScopeSpec &SS,
+                                  QualType T, SourceLocation NameLoc) {
+  ASTContext &Context = S.Context;
+
+  TypeLocBuilder Builder;
+  Builder.pushTypeSpec(T).setNameLoc(NameLoc);
+
+  T = S.getElaboratedType(ETK_None, SS, T);
+  ElaboratedTypeLoc ElabTL = Builder.push<ElaboratedTypeLoc>(T);
+  ElabTL.setElaboratedKeywordLoc(SourceLocation());
+  ElabTL.setQualifierLoc(SS.getWithLocInContext(Context));
+  return S.CreateParsedType(T, Builder.getTypeSourceInfo(Context, T));
 }
 
 Sema::NameClassification Sema::ClassifyName(Scope *S,
                                             CXXScopeSpec &SS,
                                             IdentifierInfo *&Name,
                                             SourceLocation NameLoc,
-                                            const Token &NextToken) {
+                                            const Token &NextToken,
+                                            bool IsAddressOfOperand,
+                                            CorrectionCandidateCallback *CCC) {
   DeclarationNameInfo NameInfo(Name, NameLoc);
   ObjCMethodDecl *CurMethod = getCurMethodDecl();
   
@@ -632,25 +655,11 @@ Corrected:
 
     // Perform typo correction to determine if there is another name that is
     // close to this name.
-    if (!SecondTry) {
+    if (!SecondTry && CCC) {
       SecondTry = true;
-      CorrectionCandidateCallback DefaultValidator;
-      // Try to limit which sets of keywords should be included in typo
-      // correction based on what the next token is.
-      DefaultValidator.WantTypeSpecifiers =
-          NextToken.is(tok::l_paren) || NextToken.is(tok::less) ||
-          NextToken.is(tok::identifier) || NextToken.is(tok::star) ||
-          NextToken.is(tok::amp) || NextToken.is(tok::l_square);
-      DefaultValidator.WantExpressionKeywords =
-          NextToken.is(tok::l_paren) || NextToken.is(tok::identifier) ||
-          NextToken.is(tok::arrow) || NextToken.is(tok::period);
-      DefaultValidator.WantRemainingKeywords =
-          NextToken.is(tok::l_paren) || NextToken.is(tok::semi) ||
-          NextToken.is(tok::identifier) || NextToken.is(tok::l_brace);
-      DefaultValidator.WantCXXNamedCasts = false;
       if (TypoCorrection Corrected = CorrectTypo(Result.getLookupNameInfo(),
                                                  Result.getLookupKind(), S, 
-                                                 &SS, DefaultValidator)) {
+                                                 &SS, *CCC)) {
         unsigned UnqualifiedDiag = diag::err_undeclared_var_use_suggest;
         unsigned QualifiedDiag = diag::err_no_member_suggest;
         std::string CorrectedStr(Corrected.getAsString(getLangOpts()));
@@ -705,7 +714,7 @@ Corrected:
         if (ObjCIvarDecl *Ivar = Result.getAsSingle<ObjCIvarDecl>()) {
           Result.clear();
           ExprResult E(LookupInObjCMethod(Result, S, Ivar->getIdentifier()));
-          return move(E);
+          return E;
         }
         
         goto Corrected;
@@ -731,8 +740,9 @@ Corrected:
     // perform some heroics to see if we actually have a 
     // template-argument-list, which would indicate a missing 'template'
     // keyword here.
-    return BuildDependentDeclRefExpr(SS, /*TemplateKWLoc=*/SourceLocation(),
-                                     NameInfo, /*TemplateArgs=*/0);
+    return ActOnDependentIdExpression(SS, /*TemplateKWLoc=*/SourceLocation(),
+                                      NameInfo, IsAddressOfOperand,
+                                      /*TemplateArgs=*/0);
   }
 
   case LookupResult::Found:
@@ -808,14 +818,16 @@ Corrected:
       return NameClassification::TypeTemplate(Template);
     }
   }
-  
+
   NamedDecl *FirstDecl = (*Result.begin())->getUnderlyingDecl();
   if (TypeDecl *Type = dyn_cast<TypeDecl>(FirstDecl)) {
     DiagnoseUseOfDecl(Type, NameLoc);
     QualType T = Context.getTypeDeclType(Type);
+    if (SS.isNotEmpty())
+      return buildNestedType(*this, SS, T, NameLoc);
     return ParsedType::make(T);
   }
-  
+
   ObjCInterfaceDecl *Class = dyn_cast<ObjCInterfaceDecl>(FirstDecl);
   if (!Class) {
     // FIXME: It's unfortunate that we don't have a Type node for handling this.
@@ -838,24 +850,28 @@ Corrected:
     return ParsedType::make(T);
   }
 
+  // We can have a type template here if we're classifying a template argument.
+  if (isa<TemplateDecl>(FirstDecl) && !isa<FunctionTemplateDecl>(FirstDecl))
+    return NameClassification::TypeTemplate(
+        TemplateName(cast<TemplateDecl>(FirstDecl)));
+
   // Check for a tag type hidden by a non-type decl in a few cases where it
   // seems likely a type is wanted instead of the non-type that was found.
-  if (!getLangOpts().ObjC1 && FirstDecl && !isa<ClassTemplateDecl>(FirstDecl) &&
-      !isa<TypeAliasTemplateDecl>(FirstDecl)) {
+  if (!getLangOpts().ObjC1) {
     bool NextIsOp = NextToken.is(tok::amp) || NextToken.is(tok::star);
     if ((NextToken.is(tok::identifier) ||
          (NextIsOp && FirstDecl->isFunctionOrFunctionTemplate())) &&
         isTagTypeWithMissingTag(*this, Result, S, SS, Name, NameLoc)) {
-      FirstDecl = (*Result.begin())->getUnderlyingDecl();
-      if (TypeDecl *Type = dyn_cast<TypeDecl>(FirstDecl)) {
-        DiagnoseUseOfDecl(Type, NameLoc);
-        QualType T = Context.getTypeDeclType(Type);
-        return ParsedType::make(T);
-      }
+      TypeDecl *Type = Result.getAsSingle<TypeDecl>();
+      DiagnoseUseOfDecl(Type, NameLoc);
+      QualType T = Context.getTypeDeclType(Type);
+      if (SS.isNotEmpty())
+        return buildNestedType(*this, SS, T, NameLoc);
+      return ParsedType::make(T);
     }
   }
   
-  if (!Result.empty() && (*Result.begin())->isCXXClassMember())
+  if (FirstDecl->isCXXClassMember())
     return BuildPossibleImplicitMemberExpr(SS, SourceLocation(), Result, 0);
 
   bool ADL = UseArgumentDependentLookup(SS, Result, NextToken.is(tok::l_paren));
@@ -1248,7 +1264,7 @@ static bool ShouldDiagnoseUnusedDecl(const NamedDecl *D) {
     QualType Ty = VD->getType();
 
     // Only look at the outermost level of typedef.
-    if (const TypedefType *TT = dyn_cast<TypedefType>(Ty)) {
+    if (const TypedefType *TT = Ty->getAs<TypedefType>()) {
       if (TT->getDecl()->hasAttr<UnusedAttr>())
         return false;
     }
@@ -1908,6 +1924,19 @@ static bool canRedefineFunction(const FunctionDecl *FD,
           FD->getStorageClass() == SC_Extern);
 }
 
+/// Is the given calling convention the ABI default for the given
+/// declaration?
+static bool isABIDefaultCC(Sema &S, CallingConv CC, FunctionDecl *D) {
+  CallingConv ABIDefaultCC;
+  if (isa<CXXMethodDecl>(D) && cast<CXXMethodDecl>(D)->isInstance()) {
+    ABIDefaultCC = S.Context.getDefaultCXXMethodCallConv(D->isVariadic());
+  } else {
+    // Free C function or a static method.
+    ABIDefaultCC = (S.Context.getLangOpts().MRTD ? CC_X86StdCall : CC_C);
+  }
+  return ABIDefaultCC == CC;
+}
+
 /// MergeFunctionDecl - We just parsed a function 'New' from
 /// declarator D which has the same name and scope as a previous
 /// declaration 'Old'.  Figure out how to resolve this situation,
@@ -1976,6 +2005,9 @@ bool Sema::MergeFunctionDecl(FunctionDecl *New, Decl *OldD, Scope *S) {
   // later declared or defined without one, the second decl assumes the
   // calling convention of the first.
   //
+  // It's OK if a function is first declared without a calling convention,
+  // but is later declared or defined with the default calling convention.
+  //
   // For the new decl, we have to look at the NON-canonical type to tell the
   // difference between a function that really doesn't have a calling
   // convention and one that is declared cdecl. That's because in
@@ -1989,10 +2021,22 @@ bool Sema::MergeFunctionDecl(FunctionDecl *New, Decl *OldD, Scope *S) {
   FunctionType::ExtInfo OldTypeInfo = OldType->getExtInfo();
   FunctionType::ExtInfo NewTypeInfo = NewType->getExtInfo();
   bool RequiresAdjustment = false;
-  if (OldTypeInfo.getCC() != CC_Default &&
-      NewTypeInfo.getCC() == CC_Default) {
+  if (OldTypeInfo.getCC() == NewTypeInfo.getCC()) {
+    // Fast path: nothing to do.
+
+  // Inherit the CC from the previous declaration if it was specified
+  // there but not here.
+  } else if (NewTypeInfo.getCC() == CC_Default) {
     NewTypeInfo = NewTypeInfo.withCallingConv(OldTypeInfo.getCC());
     RequiresAdjustment = true;
+
+  // Don't complain about mismatches when the default CC is
+  // effectively the same as the explict one.
+  } else if (OldTypeInfo.getCC() == CC_Default &&
+             isABIDefaultCC(*this, NewTypeInfo.getCC(), New)) {
+    NewTypeInfo = NewTypeInfo.withCallingConv(OldTypeInfo.getCC());
+    RequiresAdjustment = true;
+
   } else if (!Context.isSameCallConv(OldTypeInfo.getCC(),
                                      NewTypeInfo.getCC())) {
     // Calling conventions really aren't compatible, so complain.
@@ -2398,7 +2442,7 @@ void Sema::MergeVarDeclTypes(VarDecl *New, VarDecl *Old) {
   }
   if (MergedT.isNull()) {
     Diag(New->getLocation(), diag::err_redefinition_different_type)
-      << New->getDeclName();
+      << New->getDeclName() << New->getType() << Old->getType();
     Diag(Old->getLocation(), diag::note_previous_definition);
     return New->setInvalidDecl();
   }
@@ -2551,8 +2595,7 @@ void Sema::MergeVarDecl(VarDecl *New, LookupResult &Previous) {
 /// no declarator (e.g. "struct foo;") is parsed.
 Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
                                        DeclSpec &DS) {
-  return ParsedFreeStandingDeclSpec(S, AS, DS,
-                                    MultiTemplateParamsArg(*this, 0, 0));
+  return ParsedFreeStandingDeclSpec(S, AS, DS, MultiTemplateParamsArg());
 }
 
 /// ParsedFreeStandingDeclSpec - This method is invoked when a declspec with
@@ -2565,6 +2608,7 @@ Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
   TagDecl *Tag = 0;
   if (DS.getTypeSpecType() == DeclSpec::TST_class ||
       DS.getTypeSpecType() == DeclSpec::TST_struct ||
+      DS.getTypeSpecType() == DeclSpec::TST_interface ||
       DS.getTypeSpecType() == DeclSpec::TST_union ||
       DS.getTypeSpecType() == DeclSpec::TST_enum) {
     TagD = DS.getRepAsDecl();
@@ -2603,7 +2647,8 @@ Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
       Diag(DS.getConstexprSpecLoc(), diag::err_constexpr_tag)
         << (DS.getTypeSpecType() == DeclSpec::TST_class ? 0 :
             DS.getTypeSpecType() == DeclSpec::TST_struct ? 1 :
-            DS.getTypeSpecType() == DeclSpec::TST_union ? 2 : 3);
+            DS.getTypeSpecType() == DeclSpec::TST_interface ? 2 :
+            DS.getTypeSpecType() == DeclSpec::TST_union ? 3 : 4);
     else
       Diag(DS.getConstexprSpecLoc(), diag::err_constexpr_no_declarators);
     // Don't emit warnings after this error.
@@ -2724,6 +2769,7 @@ Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
     DeclSpec::TST TypeSpecType = DS.getTypeSpecType();
     if (TypeSpecType == DeclSpec::TST_class ||
         TypeSpecType == DeclSpec::TST_struct ||
+        TypeSpecType == DeclSpec::TST_interface ||
         TypeSpecType == DeclSpec::TST_union ||
         TypeSpecType == DeclSpec::TST_enum) {
       AttributeList* attrs = DS.getAttributes().getList();
@@ -2733,7 +2779,8 @@ Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
         << attrs->getName()
         << (TypeSpecType == DeclSpec::TST_class ? 0 :
             TypeSpecType == DeclSpec::TST_struct ? 1 :
-            TypeSpecType == DeclSpec::TST_union ? 2 : 3);
+            TypeSpecType == DeclSpec::TST_union ? 2 :
+            TypeSpecType == DeclSpec::TST_interface ? 3 : 4);
         attrs = attrs->getNext();
       }
     }
@@ -3353,7 +3400,6 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
   switch (DS.getTypeSpecType()) {
   case DeclSpec::TST_typename:
   case DeclSpec::TST_typeofType:
-  case DeclSpec::TST_decltype:
   case DeclSpec::TST_underlyingType:
   case DeclSpec::TST_atomic: {
     // Grab the type from the parser.
@@ -3377,6 +3423,7 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
     break;
   }
 
+  case DeclSpec::TST_decltype:
   case DeclSpec::TST_typeofExpr: {
     Expr *E = DS.getRepAsExpr();
     ExprResult Result = S.RebuildExprInCurrentInstantiation(E);
@@ -3411,7 +3458,7 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
 
 Decl *Sema::ActOnDeclarator(Scope *S, Declarator &D) {
   D.setFunctionDefinitionKind(FDK_Declaration);
-  Decl *Dcl = HandleDeclarator(S, D, MultiTemplateParamsArg(*this));
+  Decl *Dcl = HandleDeclarator(S, D, MultiTemplateParamsArg());
 
   if (OriginalLexicalContext && OriginalLexicalContext->isObjCContainer() &&
       Dcl && Dcl->getDeclContext()->isFileContext())
@@ -3476,7 +3523,8 @@ bool Sema::diagnoseQualifiedDeclaration(CXXScopeSpec &SS, DeclContext *DC,
   //   void X::f();
   // };
   if (Cur->Equals(DC)) {
-    Diag(Loc, diag::warn_member_extra_qualification)
+    Diag(Loc, LangOpts.MicrosoftExt? diag::warn_member_extra_qualification
+                                   : diag::err_member_extra_qualification)
       << Name << FixItHint::CreateRemoval(SS.getRange());
     SS.clear();
     return false;
@@ -3710,11 +3758,11 @@ Decl *Sema::HandleDeclarator(Scope *S, Declarator &D,
     New = ActOnTypedefDeclarator(S, D, DC, TInfo, Previous);
   } else if (R->isFunctionType()) {
     New = ActOnFunctionDeclarator(S, D, DC, TInfo, Previous,
-                                  move(TemplateParamLists),
+                                  TemplateParamLists,
                                   AddToScope);
   } else {
     New = ActOnVariableDeclarator(S, D, DC, TInfo, Previous,
-                                  move(TemplateParamLists));
+                                  TemplateParamLists);
   }
 
   if (New == 0)
@@ -4203,7 +4251,7 @@ Sema::ActOnVariableDeclarator(Scope *S, Declarator &D, DeclContext *DC,
                                   D.getDeclSpec().getLocStart(),
                                                   D.getIdentifierLoc(),
                                                   D.getCXXScopeSpec(),
-                                                  TemplateParamLists.get(),
+                                                  TemplateParamLists.data(),
                                                   TemplateParamLists.size(),
                                                   /*never a friend*/ false,
                                                   isExplicitSpecialization,
@@ -4244,7 +4292,7 @@ Sema::ActOnVariableDeclarator(Scope *S, Declarator &D, DeclContext *DC,
     if (TemplateParamLists.size() > 0 && D.getCXXScopeSpec().isSet()) {
       NewVD->setTemplateParameterListsInfo(Context,
                                            TemplateParamLists.size(),
-                                           TemplateParamLists.release());
+                                           TemplateParamLists.data());
     }
 
     if (D.getDeclSpec().isConstexprSpecified())
@@ -4280,6 +4328,14 @@ Sema::ActOnVariableDeclarator(Scope *S, Declarator &D, DeclContext *DC,
 
   // Handle attributes prior to checking for duplicates in MergeVarDecl
   ProcessDeclAttributes(S, NewVD, D);
+
+  if (getLangOpts().CUDA) {
+    // CUDA B.2.5: "__shared__ and __constant__ variables have implied static
+    // storage [duration]."
+    if (SC == SC_None && S->getFnParent() != 0 &&
+       (NewVD->hasAttr<CUDASharedAttr>() || NewVD->hasAttr<CUDAConstantAttr>()))
+      NewVD->setStorageClass(SC_Static);
+  }
 
   // In auto-retain/release, infer strong retension for variables of
   // retainable type.
@@ -4522,8 +4578,10 @@ bool Sema::CheckVariableDeclaration(VarDecl *NewVD,
       && !NewVD->hasAttr<BlocksAttr>()) {
     if (getLangOpts().getGC() != LangOptions::NonGC)
       Diag(NewVD->getLocation(), diag::warn_gc_attribute_weak_on_local);
-    else
+    else {
+      assert(!getLangOpts().ObjCAutoRefCount);
       Diag(NewVD->getLocation(), diag::warn_attribute_weak_on_local);
+    }
   }
   
   bool isVM = T->isVariablyModifiedType();
@@ -4852,7 +4910,7 @@ static NamedDecl* DiagnoseInvalidRedeclaration(
 
   bool NewFDisConst = false;
   if (CXXMethodDecl *NewMD = dyn_cast<CXXMethodDecl>(NewFD))
-    NewFDisConst = NewMD->getTypeQualifiers() & Qualifiers::Const;
+    NewFDisConst = NewMD->isConst();
 
   for (llvm::SmallVector<std::pair<FunctionDecl*, unsigned>, 1>::iterator
        NearMatch = NearMatches.begin(), NearMatchEnd = NearMatches.end();
@@ -4860,7 +4918,7 @@ static NamedDecl* DiagnoseInvalidRedeclaration(
     FunctionDecl *FD = NearMatch->first;
     bool FDisConst = false;
     if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(FD))
-      FDisConst = MD->getTypeQualifiers() & Qualifiers::Const;
+      FDisConst = MD->isConst();
 
     if (unsigned Idx = NearMatch->second) {
       ParmVarDecl *FDParam = FD->getParamDecl(Idx-1);
@@ -5072,6 +5130,22 @@ static FunctionDecl* CreateNewFunctionDecl(Sema &SemaRef, Declarator &D,
   }
 }
 
+void Sema::checkVoidParamDecl(ParmVarDecl *Param) {
+  // In C++, the empty parameter-type-list must be spelled "void"; a
+  // typedef of void is not permitted.
+  if (getLangOpts().CPlusPlus &&
+      Param->getType().getUnqualifiedType() != Context.VoidTy) {
+    bool IsTypeAlias = false;
+    if (const TypedefType *TT = Param->getType()->getAs<TypedefType>())
+      IsTypeAlias = isa<TypeAliasDecl>(TT->getDecl());
+    else if (const TemplateSpecializationType *TST =
+               Param->getType()->getAs<TemplateSpecializationType>())
+      IsTypeAlias = TST->isTypeAlias();
+    Diag(Param->getLocation(), diag::err_param_typedef_of_void)
+      << IsTypeAlias;
+  }
+}
+
 NamedDecl*
 Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
                               TypeSourceInfo *TInfo, LookupResult &Previous,
@@ -5138,6 +5212,15 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       NewFD->setImplicitlyInline();
     }
 
+    // If this is a method defined in an __interface, and is not a constructor
+    // or an overloaded operator, then set the pure flag (isVirtual will already
+    // return true).
+    if (const CXXRecordDecl *Parent =
+          dyn_cast<CXXRecordDecl>(NewFD->getDeclContext())) {
+      if (Parent->isInterface() && cast<CXXMethodDecl>(NewFD)->isUserProvided())
+        NewFD->setPure(true);
+    }
+
     SetNestedNameSpecifier(NewFD, D);
     isExplicitSpecialization = false;
     isFunctionTemplateSpecialization = false;
@@ -5157,7 +5240,7 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
                                   D.getDeclSpec().getLocStart(),
                                   D.getIdentifierLoc(),
                                   D.getCXXScopeSpec(),
-                                  TemplateParamLists.get(),
+                                  TemplateParamLists.data(),
                                   TemplateParamLists.size(),
                                   isFriend,
                                   isExplicitSpecialization,
@@ -5196,7 +5279,7 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
         if (TemplateParamLists.size() > 1) {
           NewFD->setTemplateParameterListsInfo(Context,
                                                TemplateParamLists.size() - 1,
-                                               TemplateParamLists.release());
+                                               TemplateParamLists.data());
         }
       } else {
         // This is a function template specialization.
@@ -5204,7 +5287,7 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
         // For source fidelity, store all the template param lists.
         NewFD->setTemplateParameterListsInfo(Context,
                                              TemplateParamLists.size(),
-                                             TemplateParamLists.release());
+                                             TemplateParamLists.data());
 
         // C++0x [temp.expl.spec]p20 forbids "template<> friend void foo(int);".
         if (isFriend) {
@@ -5236,7 +5319,7 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
         // For source fidelity, store all the template param lists.
         NewFD->setTemplateParameterListsInfo(Context,
                                              TemplateParamLists.size(),
-                                             TemplateParamLists.release());
+                                             TemplateParamLists.data());
     }
 
     if (Invalid) {
@@ -5413,21 +5496,7 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
         FTI.ArgInfo[0].Param &&
         cast<ParmVarDecl>(FTI.ArgInfo[0].Param)->getType()->isVoidType()) {
       // Empty arg list, don't push any params.
-      ParmVarDecl *Param = cast<ParmVarDecl>(FTI.ArgInfo[0].Param);
-
-      // In C++, the empty parameter-type-list must be spelled "void"; a
-      // typedef of void is not permitted.
-      if (getLangOpts().CPlusPlus &&
-          Param->getType().getUnqualifiedType() != Context.VoidTy) {
-        bool IsTypeAlias = false;
-        if (const TypedefType *TT = Param->getType()->getAs<TypedefType>())
-          IsTypeAlias = isa<TypeAliasDecl>(TT->getDecl());
-        else if (const TemplateSpecializationType *TST =
-                   Param->getType()->getAs<TemplateSpecializationType>())
-          IsTypeAlias = TST->isTypeAlias();
-        Diag(Param->getLocation(), diag::err_param_typedef_of_void)
-          << IsTypeAlias;
-      }
+      checkVoidParamDecl(cast<ParmVarDecl>(FTI.ArgInfo[0].Param));
     } else if (FTI.NumArgs > 0 && FTI.ArgInfo[0].Param != 0) {
       for (unsigned i = 0, e = FTI.NumArgs; i != e; ++i) {
         ParmVarDecl *Param = cast<ParmVarDecl>(FTI.ArgInfo[i].Param);
@@ -5500,6 +5569,9 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       D.setRedeclaration(CheckFunctionDeclaration(S, NewFD, Previous,
                                                   isExplicitSpecialization));
     }
+    // Make graceful recovery from an invalid redeclaration.
+    else if (!Previous.empty())
+           D.setRedeclaration(true);
     assert((NewFD->isInvalidDecl() || !D.isRedeclaration() ||
             Previous.getResultKind() != LookupResult::FoundOverloaded) &&
            "previous declaration set still overloaded");
@@ -5510,12 +5582,10 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       TemplateIdAnnotation *TemplateId = D.getName().TemplateId;
       TemplateArgs.setLAngleLoc(TemplateId->LAngleLoc);
       TemplateArgs.setRAngleLoc(TemplateId->RAngleLoc);
-      ASTTemplateArgsPtr TemplateArgsPtr(*this,
-                                         TemplateId->getTemplateArgs(),
+      ASTTemplateArgsPtr TemplateArgsPtr(TemplateId->getTemplateArgs(),
                                          TemplateId->NumArgs);
       translateTemplateArguments(TemplateArgsPtr,
                                  TemplateArgs);
-      TemplateArgsPtr.release();
     
       HasExplicitTemplateArgs = true;
     
@@ -6174,6 +6244,7 @@ namespace {
     Decl *OrigDecl;
     bool isRecordType;
     bool isPODType;
+    bool isReferenceType;
 
   public:
     typedef EvaluatedExprVisitor<SelfReferenceChecker> Inherited;
@@ -6182,34 +6253,20 @@ namespace {
                                                     S(S), OrigDecl(OrigDecl) {
       isPODType = false;
       isRecordType = false;
+      isReferenceType = false;
       if (ValueDecl *VD = dyn_cast<ValueDecl>(OrigDecl)) {
         isPODType = VD->getType().isPODType(S.Context);
         isRecordType = VD->getType()->isRecordType();
+        isReferenceType = VD->getType()->isReferenceType();
       }
-    }
-
-    // Sometimes, the expression passed in lacks the casts that are used
-    // to determine which DeclRefExpr's to check.  Assume that the casts
-    // are present and continue visiting the expression.
-    void HandleExpr(Expr *E) {
-      // Skip checking T a = a where T is not a record type.  Doing so is a
-      // way to silence uninitialized warnings.
-      if (isRecordType)
-        if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E))
-          HandleDeclRefExpr(DRE);
-
-      if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E)) {
-        HandleValue(CO->getTrueExpr());
-        HandleValue(CO->getFalseExpr());
-      }
-
-      Visit(E);
     }
 
     // For most expressions, the cast is directly above the DeclRefExpr.
     // For conditional operators, the cast can be outside the conditional
     // operator if both expressions are DeclRefExpr's.
     void HandleValue(Expr *E) {
+      if (isReferenceType)
+        return;
       E = E->IgnoreParenImpCasts();
       if (DeclRefExpr* DRE = dyn_cast<DeclRefExpr>(E)) {
         HandleDeclRefExpr(DRE);
@@ -6219,11 +6276,32 @@ namespace {
       if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E)) {
         HandleValue(CO->getTrueExpr());
         HandleValue(CO->getFalseExpr());
+        return;
+      }
+
+      if (isa<MemberExpr>(E)) {
+        Expr *Base = E->IgnoreParenImpCasts();
+        while (MemberExpr *ME = dyn_cast<MemberExpr>(Base)) {
+          // Check for static member variables and don't warn on them.
+          if (!isa<FieldDecl>(ME->getMemberDecl()))
+            return;
+          Base = ME->getBase()->IgnoreParenImpCasts();
+        }
+        if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Base))
+          HandleDeclRefExpr(DRE);
+        return;
       }
     }
 
+    // Reference types are handled here since all uses of references are
+    // bad, not just r-value uses.
+    void VisitDeclRefExpr(DeclRefExpr *E) {
+      if (isReferenceType)
+        HandleDeclRefExpr(E);
+    }
+
     void VisitImplicitCastExpr(ImplicitCastExpr *E) {
-      if ((!isRecordType && E->getCastKind() == CK_LValueToRValue) ||
+      if (E->getCastKind() == CK_LValueToRValue ||
           (isRecordType && E->getCastKind() == CK_NoOp))
         HandleValue(E->getSubExpr());
 
@@ -6234,22 +6312,36 @@ namespace {
       // Don't warn on arrays since they can be treated as pointers.
       if (E->getType()->canDecayToPointerType()) return;
 
-      ValueDecl *VD = E->getMemberDecl();
-      CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(VD);
-      if (isa<FieldDecl>(VD) || (MD && !MD->isStatic()))
-        if (DeclRefExpr *DRE
-              = dyn_cast<DeclRefExpr>(E->getBase()->IgnoreParenImpCasts())) {
-          HandleDeclRefExpr(DRE);
-          return;
-        }
+      // Warn when a non-static method call is followed by non-static member
+      // field accesses, which is followed by a DeclRefExpr.
+      CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(E->getMemberDecl());
+      bool Warn = (MD && !MD->isStatic());
+      Expr *Base = E->getBase()->IgnoreParenImpCasts();
+      while (MemberExpr *ME = dyn_cast<MemberExpr>(Base)) {
+        if (!isa<FieldDecl>(ME->getMemberDecl()))
+          Warn = false;
+        Base = ME->getBase()->IgnoreParenImpCasts();
+      }
 
-      Inherited::VisitMemberExpr(E);
+      if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Base)) {
+        if (Warn)
+          HandleDeclRefExpr(DRE);
+        return;
+      }
+
+      // The base of a MemberExpr is not a MemberExpr or a DeclRefExpr.
+      // Visit that expression.
+      Visit(Base);
     }
 
     void VisitUnaryOperator(UnaryOperator *E) {
       // For POD record types, addresses of its own members are well-defined.
-      if (E->getOpcode() == UO_AddrOf && isRecordType && isPODType &&
-          isa<MemberExpr>(E->getSubExpr()->IgnoreParens())) return;
+      if (E->getOpcode() == UO_AddrOf && isRecordType &&
+          isa<MemberExpr>(E->getSubExpr()->IgnoreParens())) {
+        if (!isPODType)
+          HandleValue(E->getSubExpr());
+        return;
+      }
       Inherited::VisitUnaryOperator(E);
     } 
 
@@ -6258,20 +6350,38 @@ namespace {
     void HandleDeclRefExpr(DeclRefExpr *DRE) {
       Decl* ReferenceDecl = DRE->getDecl(); 
       if (OrigDecl != ReferenceDecl) return;
-      LookupResult Result(S, DRE->getNameInfo(), Sema::LookupOrdinaryName,
-                          Sema::NotForRedeclaration);
+      unsigned diag = isReferenceType
+          ? diag::warn_uninit_self_reference_in_reference_init
+          : diag::warn_uninit_self_reference_in_init;
       S.DiagRuntimeBehavior(DRE->getLocStart(), DRE,
-                            S.PDiag(diag::warn_uninit_self_reference_in_init)
-                              << Result.getLookupName()
+                            S.PDiag(diag)
+                              << DRE->getNameInfo().getName()
                               << OrigDecl->getLocation()
                               << DRE->getSourceRange());
     }
   };
-}
 
-/// CheckSelfReference - Warns if OrigDecl is used in expression E.
-void Sema::CheckSelfReference(Decl* OrigDecl, Expr *E) {
-  SelfReferenceChecker(*this, OrigDecl).HandleExpr(E);
+  /// CheckSelfReference - Warns if OrigDecl is used in expression E.
+  static void CheckSelfReference(Sema &S, Decl* OrigDecl, Expr *E,
+                                 bool DirectInit) {
+    // Parameters arguments are occassionially constructed with itself,
+    // for instance, in recursive functions.  Skip them.
+    if (isa<ParmVarDecl>(OrigDecl))
+      return;
+
+    E = E->IgnoreParens();
+
+    // Skip checking T a = a where T is not a record or reference type.
+    // Doing so is a way to silence uninitialized warnings.
+    if (!DirectInit && !cast<VarDecl>(OrigDecl)->getType()->isRecordType())
+      if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E))
+        if (ICE->getCastKind() == CK_LValueToRValue)
+          if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(ICE->getSubExpr()))
+            if (DRE->getDecl() == OrigDecl)
+              return;
+
+    SelfReferenceChecker(S, OrigDecl).Visit(E);
+  }
 }
 
 /// AddInitializerToDecl - Adds the initializer Init to the
@@ -6307,15 +6417,6 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
     RealDecl->setInvalidDecl();
     return;
   }
-
-  // Check for self-references within variable initializers.
-  // Variables declared within a function/method body are handled
-  // by a dataflow analysis.
-  // Record types initialized by initializer list are handled here.
-  // Initialization by constructors are handled in TryConstructorInitialization.
-  if (!VDecl->hasLocalStorage() && !VDecl->isStaticLocal() &&
-      (isa<InitListExpr>(Init) || !VDecl->getType()->isRecordType()))
-    CheckSelfReference(RealDecl, Init);
 
   ParenListExpr *CXXDirectInit = dyn_cast<ParenListExpr>(Init);
 
@@ -6492,14 +6593,21 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
     }
     InitializationSequence InitSeq(*this, Entity, Kind, Args, NumArgs);
     ExprResult Result = InitSeq.Perform(*this, Entity, Kind,
-                                              MultiExprArg(*this, Args,NumArgs),
-                                              &DclT);
+                                        MultiExprArg(Args, NumArgs), &DclT);
     if (Result.isInvalid()) {
       VDecl->setInvalidDecl();
       return;
     }
 
     Init = Result.takeAs<Expr>();
+  }
+
+  // Check for self-references within variable initializers.
+  // Variables declared within a function/method body (except for references)
+  // are handled by a dataflow analysis.
+  if (!VDecl->hasLocalStorage() || VDecl->getType()->isRecordType() ||
+      VDecl->getType()->isReferenceType()) {
+    CheckSelfReference(*this, RealDecl, Init, DirectInit);
   }
 
   // If the type changed, it means we had an incomplete type that was
@@ -6512,8 +6620,27 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
   // Check any implicit conversions within the expression.
   CheckImplicitConversions(Init, VDecl->getLocation());
 
-  if (!VDecl->isInvalidDecl())
+  if (!VDecl->isInvalidDecl()) {
     checkUnsafeAssigns(VDecl->getLocation(), VDecl->getType(), Init);
+
+    if (VDecl->hasAttr<BlocksAttr>())
+      checkRetainCycles(VDecl, Init);
+
+    // It is safe to assign a weak reference into a strong variable.
+    // Although this code can still have problems:
+    //   id x = self.weakProp;
+    //   id y = self.weakProp;
+    // we do not warn to warn spuriously when 'x' and 'y' are on separate
+    // paths through the function. This should be revisited if
+    // -Wrepeated-use-of-weak is made flow-sensitive.
+    if (VDecl->getType().getObjCLifetime() == Qualifiers::OCL_Strong) {
+      DiagnosticsEngine::Level Level =
+        Diags.getDiagnosticLevel(diag::warn_arc_repeated_use_of_weak,
+                                 Init->getLocStart());
+      if (Level != DiagnosticsEngine::Ignored)
+        getCurFunction()->markSafeWeakUse(Init);
+    }
+  }
 
   Init = MaybeCreateExprWithCleanups(Init);
   // Attach the initializer to the decl.
@@ -6754,6 +6881,12 @@ void Sema::ActOnUninitializedDecl(Decl *RealDecl,
                                  diag::err_abstract_type_in_decl,
                                  AbstractVariableType))
         Var->setInvalidDecl();
+      if (!Type->isDependentType() && !Var->isInvalidDecl() &&
+          Var->getStorageClass() == SC_PrivateExtern) {
+        Diag(Var->getLocation(), diag::warn_private_extern);
+        Diag(Var->getLocation(), diag::note_private_extern);
+      }
+        
       return;
 
     case VarDecl::TentativeDefinition:
@@ -6874,8 +7007,7 @@ void Sema::ActOnUninitializedDecl(Decl *RealDecl,
       = InitializationKind::CreateDefault(Var->getLocation());
     
     InitializationSequence InitSeq(*this, Entity, Kind, 0, 0);
-    ExprResult Init = InitSeq.Perform(*this, Entity, Kind,
-                                      MultiExprArg(*this, 0, 0));
+    ExprResult Init = InitSeq.Perform(*this, Entity, Kind, MultiExprArg());
     if (Init.isInvalid())
       Var->setInvalidDecl();
     else if (Init.get()) {
@@ -7027,6 +7159,42 @@ void
 Sema::FinalizeDeclaration(Decl *ThisDecl) {
   // Note that we are no longer parsing the initializer for this declaration.
   ParsingInitForAutoVars.erase(ThisDecl);
+
+  // Now we have parsed the initializer and can update the table of magic
+  // tag values.
+  if (ThisDecl && ThisDecl->hasAttr<TypeTagForDatatypeAttr>()) {
+    const VarDecl *VD = dyn_cast<VarDecl>(ThisDecl);
+    if (VD && VD->getType()->isIntegralOrEnumerationType()) {
+      for (specific_attr_iterator<TypeTagForDatatypeAttr>
+               I = ThisDecl->specific_attr_begin<TypeTagForDatatypeAttr>(),
+               E = ThisDecl->specific_attr_end<TypeTagForDatatypeAttr>();
+           I != E; ++I) {
+        const Expr *MagicValueExpr = VD->getInit();
+        if (!MagicValueExpr) {
+          continue;
+        }
+        llvm::APSInt MagicValueInt;
+        if (!MagicValueExpr->isIntegerConstantExpr(MagicValueInt, Context)) {
+          Diag(I->getRange().getBegin(),
+               diag::err_type_tag_for_datatype_not_ice)
+            << LangOpts.CPlusPlus << MagicValueExpr->getSourceRange();
+          continue;
+        }
+        if (MagicValueInt.getActiveBits() > 64) {
+          Diag(I->getRange().getBegin(),
+               diag::err_type_tag_for_datatype_too_large)
+            << LangOpts.CPlusPlus << MagicValueExpr->getSourceRange();
+          continue;
+        }
+        uint64_t MagicValue = MagicValueInt.getZExtValue();
+        RegisterTypeTagForDatatype(I->getArgumentKind(),
+                                   MagicValue,
+                                   I->getMatchingCType(),
+                                   I->getLayoutCompatible(),
+                                   I->getMustBeNull());
+      }
+    }
+  }
 }
 
 Sema::DeclGroupPtrTy
@@ -7135,7 +7303,7 @@ void Sema::ActOnDocumentableDecls(Decl **Group, unsigned NumDecls) {
     // the lookahead in the lexer: we've consumed the semicolon and looked
     // ahead through comments.
     for (unsigned i = 0; i != NumDecls; ++i)
-      Context.getCommentForDecl(Group[i]);
+      Context.getCommentForDecl(Group[i], &PP);
   }
 }
 
@@ -7421,8 +7589,7 @@ Decl *Sema::ActOnStartOfFunctionDef(Scope *FnBodyScope, Declarator &D) {
   Scope *ParentScope = FnBodyScope->getParent();
 
   D.setFunctionDefinitionKind(FDK_Definition);
-  Decl *DP = HandleDeclarator(ParentScope, D,
-                              MultiTemplateParamsArg(*this));
+  Decl *DP = HandleDeclarator(ParentScope, D, MultiTemplateParamsArg());
   return ActOnStartOfFunctionDef(FnBodyScope, DP);
 }
 
@@ -7623,7 +7790,9 @@ Decl *Sema::ActOnStartOfFunctionDef(Scope *FnBodyScope, Decl *D) {
         << FD->getName() << "dllimport";
     }
   }
-  ActOnDocumentableDecl(FD);
+  // We want to attach documentation to original Decl (which might be
+  // a function template).
+  ActOnDocumentableDecl(D);
   return FD;
 }
 
@@ -7662,7 +7831,7 @@ void Sema::computeNRVO(Stmt *Body, FunctionScopeInfo *Scope) {
 }
 
 Decl *Sema::ActOnFinishFunctionBody(Decl *D, Stmt *BodyArg) {
-  return ActOnFinishFunctionBody(D, move(BodyArg), false);
+  return ActOnFinishFunctionBody(D, BodyArg, false);
 }
 
 Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
@@ -7721,7 +7890,8 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
         computeNRVO(Body, getCurFunction());
     }
     if (getCurFunction()->ObjCShouldCallSuperDealloc) {
-      Diag(MD->getLocEnd(), diag::warn_objc_missing_super_dealloc);
+      Diag(MD->getLocEnd(), diag::warn_objc_missing_super_call)
+        << MD->getSelector().getAsString();
       getCurFunction()->ObjCShouldCallSuperDealloc = false;
     }
     if (getCurFunction()->ObjCShouldCallSuperFinalize) {
@@ -7750,7 +7920,8 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
     // Verify that gotos and switch cases don't jump into scopes illegally.
     if (getCurFunction()->NeedsScopeChecking() &&
         !dcl->isInvalidDecl() &&
-        !hasAnyUnrecoverableErrorsInThisFunction())
+        !hasAnyUnrecoverableErrorsInThisFunction() &&
+        !PP.isCodeCompletionEnabled())
       DiagnoseInvalidJumps(Body);
 
     if (CXXDestructorDecl *Destructor = dyn_cast<CXXDestructorDecl>(dcl)) {
@@ -8025,6 +8196,7 @@ TypedefDecl *Sema::ParseTypedefDecl(Scope *S, Declarator &D, QualType T,
   switch (D.getDeclSpec().getTypeSpecType()) {
   case TST_enum:
   case TST_struct:
+  case TST_interface:
   case TST_union:
   case TST_class: {
     TagDecl *tagFromDeclSpec = cast<TagDecl>(D.getDeclSpec().getRepAsDecl());
@@ -8100,6 +8272,29 @@ bool Sema::CheckEnumRedeclaration(SourceLocation EnumLoc, bool IsScoped,
   return false;
 }
 
+/// \brief Get diagnostic %select index for tag kind for
+/// redeclaration diagnostic message.
+/// WARNING: Indexes apply to particular diagnostics only!
+///
+/// \returns diagnostic %select index.
+static unsigned getRedeclDiagFromTagKind(TagTypeKind Tag) {
+  switch (Tag) {
+  case TTK_Struct: return 0;
+  case TTK_Interface: return 1;
+  case TTK_Class:  return 2;
+  default: llvm_unreachable("Invalid tag kind for redecl diagnostic!");
+  }
+}
+
+/// \brief Determine if tag kind is a class-key compatible with
+/// class for redeclaration (class, struct, or __interface).
+///
+/// \returns true iff the tag kind is compatible.
+static bool isClassCompatTagKind(TagTypeKind Tag)
+{
+  return Tag == TTK_Struct || Tag == TTK_Class || Tag == TTK_Interface;
+}
+
 /// \brief Determine whether a tag with a given kind is acceptable
 /// as a redeclaration of the given tag declaration.
 ///
@@ -8122,12 +8317,11 @@ bool Sema::isAcceptableTagRedeclaration(const TagDecl *Previous,
   //   struct class-key shall be used to refer to a class (clause 9)
   //   declared using the class or struct class-key.
   TagTypeKind OldTag = Previous->getTagKind();
-  if (!isDefinition || (NewTag != TTK_Class && NewTag != TTK_Struct))
+  if (!isDefinition || !isClassCompatTagKind(NewTag))
     if (OldTag == NewTag)
       return true;
 
-  if ((OldTag == TTK_Struct || OldTag == TTK_Class) &&
-      (NewTag == TTK_Struct || NewTag == TTK_Class)) {
+  if (isClassCompatTagKind(OldTag) && isClassCompatTagKind(NewTag)) {
     // Warn about the struct/class tag mismatch.
     bool isTemplate = false;
     if (const CXXRecordDecl *Record = dyn_cast<CXXRecordDecl>(Previous))
@@ -8137,7 +8331,8 @@ bool Sema::isAcceptableTagRedeclaration(const TagDecl *Previous,
       // In a template instantiation, do not offer fix-its for tag mismatches
       // since they usually mess up the template instead of fixing the problem.
       Diag(NewTagLoc, diag::warn_struct_class_tag_mismatch)
-        << (NewTag == TTK_Class) << isTemplate << &Name;
+        << getRedeclDiagFromTagKind(NewTag) << isTemplate << &Name
+        << getRedeclDiagFromTagKind(OldTag);
       return true;
     }
 
@@ -8156,13 +8351,13 @@ bool Sema::isAcceptableTagRedeclaration(const TagDecl *Previous,
           if (!previousMismatch) {
             previousMismatch = true;
             Diag(NewTagLoc, diag::warn_struct_class_previous_tag_mismatch)
-              << (NewTag == TTK_Class) << isTemplate << &Name;
+              << getRedeclDiagFromTagKind(NewTag) << isTemplate << &Name
+              << getRedeclDiagFromTagKind(I->getTagKind());
           }
           Diag(I->getInnerLocStart(), diag::note_struct_class_suggestion)
-            << (NewTag == TTK_Class)
+            << getRedeclDiagFromTagKind(NewTag)
             << FixItHint::CreateReplacement(I->getInnerLocStart(),
-                                            NewTag == TTK_Class?
-                                            "class" : "struct");
+                 TypeWithKeyword::getTagTypeKindName(NewTag));
         }
       }
       return true;
@@ -8178,16 +8373,16 @@ bool Sema::isAcceptableTagRedeclaration(const TagDecl *Previous,
     }
 
     Diag(NewTagLoc, diag::warn_struct_class_tag_mismatch)
-      << (NewTag == TTK_Class)
-      << isTemplate << &Name;
+      << getRedeclDiagFromTagKind(NewTag) << isTemplate << &Name
+      << getRedeclDiagFromTagKind(OldTag);
     Diag(Redecl->getLocation(), diag::note_previous_use);
 
     // If there is a previous defintion, suggest a fix-it.
     if (Previous->getDefinition()) {
         Diag(NewTagLoc, diag::note_struct_class_suggestion)
-          << (Redecl->getTagKind() == TTK_Class)
+          << getRedeclDiagFromTagKind(Redecl->getTagKind())
           << FixItHint::CreateReplacement(SourceRange(NewTagLoc),
-                        Redecl->getTagKind() == TTK_Class? "class" : "struct");
+               TypeWithKeyword::getTagTypeKindName(Redecl->getTagKind()));
     }
 
     return true;
@@ -8230,7 +8425,7 @@ Decl *Sema::ActOnTag(Scope *S, unsigned TagSpec, TagUseKind TUK,
       (SS.isNotEmpty() && TUK != TUK_Reference)) {
     if (TemplateParameterList *TemplateParams
           = MatchTemplateParametersToScopeSpecifier(KWLoc, NameLoc, SS,
-                                                TemplateParameterLists.get(),
+                                                TemplateParameterLists.data(),
                                                 TemplateParameterLists.size(),
                                                     TUK == TUK_Friend,
                                                     isExplicitSpecialization,
@@ -8247,8 +8442,8 @@ Decl *Sema::ActOnTag(Scope *S, unsigned TagSpec, TagUseKind TUK,
                                                SS, Name, NameLoc, Attr,
                                                TemplateParams, AS,
                                                ModulePrivateLoc,
-                                           TemplateParameterLists.size() - 1,
-                 (TemplateParameterList**) TemplateParameterLists.release());
+                                               TemplateParameterLists.size()-1,
+                                               TemplateParameterLists.data());
         return Result.get();
       } else {
         // The "template<>" header is extraneous.
@@ -8797,7 +8992,7 @@ CreateNewDecl:
       if (TemplateParameterLists.size() > 0) {
         New->setTemplateParameterListsInfo(Context,
                                            TemplateParameterLists.size(),
-                    (TemplateParameterList**) TemplateParameterLists.release());
+                                           TemplateParameterLists.data());
       }
     }
     else
@@ -9414,12 +9609,12 @@ bool Sema::CheckNontrivialField(FieldDecl *FD) {
   return false;
 }
 
-/// If the given constructor is user-provided, produce a diagnostic explaining
+/// If the given constructor is user-declared, produce a diagnostic explaining
 /// that it makes the class non-trivial.
-static bool DiagnoseNontrivialUserProvidedCtor(Sema &S, QualType QT,
+static bool diagnoseNonTrivialUserDeclaredCtor(Sema &S, QualType QT,
                                                CXXConstructorDecl *CD,
                                                Sema::CXXSpecialMember CSM) {
-  if (!CD->isUserProvided())
+  if (CD->isImplicit())
     return false;
 
   SourceLocation CtorLoc = CD->getLocation();
@@ -9442,17 +9637,17 @@ void Sema::DiagnoseNontrivial(const RecordType* T, CXXSpecialMember member) {
     if (RD->hasUserDeclaredConstructor()) {
       typedef CXXRecordDecl::ctor_iterator ctor_iter;
       for (ctor_iter CI = RD->ctor_begin(), CE = RD->ctor_end(); CI != CE; ++CI)
-        if (DiagnoseNontrivialUserProvidedCtor(*this, QT, *CI, member))
+        if (diagnoseNonTrivialUserDeclaredCtor(*this, QT, *CI, member))
           return;
 
-      // No user-provided constructors; look for constructor templates.
+      // No user-delcared constructors; look for constructor templates.
       typedef CXXRecordDecl::specific_decl_iterator<FunctionTemplateDecl>
           tmpl_iter;
       for (tmpl_iter TI(RD->decls_begin()), TE(RD->decls_end());
            TI != TE; ++TI) {
         CXXConstructorDecl *CD =
             dyn_cast<CXXConstructorDecl>(TI->getTemplatedDecl());
-        if (CD && DiagnoseNontrivialUserProvidedCtor(*this, QT, CD, member))
+        if (CD && diagnoseNonTrivialUserDeclaredCtor(*this, QT, CD, member))
           return;
       }
     }
@@ -9907,6 +10102,13 @@ void Sema::ActOnFields(Scope* S,
           }
         }
       }
+      if (isa<ObjCContainerDecl>(EnclosingDecl) &&
+          RequireNonAbstractType(FD->getLocation(), FD->getType(),
+                                 diag::err_abstract_type_in_decl,
+                                 AbstractIvarType)) {
+        // Ivars can not have abstract class types
+        FD->setInvalidDecl();
+      }
       if (Record && FDTTy->getDecl()->hasObjectMember())
         Record->setHasObjectMember(true);
     } else if (FDTy->isObjCObjectType()) {
@@ -9915,8 +10117,7 @@ void Sema::ActOnFields(Scope* S,
         << FixItHint::CreateInsertion(FD->getLocation(), "*");
       QualType T = Context.getObjCObjectPointerType(FD->getType());
       FD->setType(T);
-    } 
-    else if (!getLangOpts().CPlusPlus) {
+    } else if (!getLangOpts().CPlusPlus) {
       if (getLangOpts().ObjCAutoRefCount && Record && !ARCErrReported) {
         // It's an error in ARC if a field has lifetime.
         // We don't want to report this in a system header, though,
@@ -9973,42 +10174,6 @@ void Sema::ActOnFields(Scope* S,
           Convs->setAccess(I, (*I)->getAccess());
         
         if (!CXXRecord->isDependentType()) {
-          // Objective-C Automatic Reference Counting:
-          //   If a class has a non-static data member of Objective-C pointer
-          //   type (or array thereof), it is a non-POD type and its
-          //   default constructor (if any), copy constructor, copy assignment
-          //   operator, and destructor are non-trivial.
-          //
-          // This rule is also handled by CXXRecordDecl::completeDefinition(). 
-          // However, here we check whether this particular class is only 
-          // non-POD because of the presence of an Objective-C pointer member. 
-          // If so, objects of this type cannot be shared between code compiled 
-          // with ARC and code compiled with manual retain/release.
-          if (getLangOpts().ObjCAutoRefCount &&
-              CXXRecord->hasObjectMember() && 
-              CXXRecord->getLinkage() == ExternalLinkage) {
-            if (CXXRecord->isPOD()) {
-              Diag(CXXRecord->getLocation(), 
-                   diag::warn_arc_non_pod_class_with_object_member)
-               << CXXRecord;
-            } else {
-              // FIXME: Fix-Its would be nice here, but finding a good location
-              // for them is going to be tricky.
-              if (CXXRecord->hasTrivialCopyConstructor())
-                Diag(CXXRecord->getLocation(), 
-                     diag::warn_arc_trivial_member_function_with_object_member)
-                  << CXXRecord << 0;
-              if (CXXRecord->hasTrivialCopyAssignment())
-                Diag(CXXRecord->getLocation(), 
-                     diag::warn_arc_trivial_member_function_with_object_member)
-                << CXXRecord << 1;
-              if (CXXRecord->hasTrivialDestructor())
-                Diag(CXXRecord->getLocation(), 
-                     diag::warn_arc_trivial_member_function_with_object_member)
-                << CXXRecord << 2;
-            }
-          }
-          
           // Adjust user-defined destructor exception spec.
           if (getLangOpts().CPlusPlus0x &&
               CXXRecord->hasUserDeclaredDestructor())
@@ -10040,7 +10205,7 @@ void Sema::ActOnFields(Scope* S,
                 //   class subobject has more than one final overrider the
                 //   program is ill-formed.
                 Diag(Record->getLocation(), diag::err_multiple_final_overriders)
-                  << (NamedDecl *)M->first << Record;
+                  << (const NamedDecl *)M->first << Record;
                 Diag(M->first->getLocation(), 
                      diag::note_overridden_virtual_function);
                 for (OverridingMethods::overriding_iterator 
@@ -10048,7 +10213,7 @@ void Sema::ActOnFields(Scope* S,
                        OMEnd = SO->second.end();
                      OM != OMEnd; ++OM)
                   Diag(OM->Method->getLocation(), diag::note_final_overrider)
-                    << (NamedDecl *)M->first << OM->Method->getParent();
+                    << (const NamedDecl *)M->first << OM->Method->getParent();
                 
                 Record->setInvalidDecl();
               }
@@ -10409,57 +10574,6 @@ Decl *Sema::ActOnEnumConstant(Scope *S, Decl *theEnumDecl, Decl *lastEnumConst,
   return New;
 }
 
-// Emits a warning if every element in the enum is the same value and if
-// every element is initialized with a integer or boolean literal.
-static void CheckForUniqueEnumValues(Sema &S, Decl **Elements,
-                                     unsigned NumElements, EnumDecl *Enum,
-                                     QualType EnumType) {
-  if (S.Diags.getDiagnosticLevel(diag::warn_identical_enum_values,
-                                 Enum->getLocation()) ==
-      DiagnosticsEngine::Ignored)
-    return;
-
-  if (NumElements < 2)
-    return;
-
-  if (!Enum->getIdentifier())
-    return;
-
-  llvm::APSInt FirstVal;
-
-  for (unsigned i = 0; i != NumElements; ++i) {
-    EnumConstantDecl *ECD = cast_or_null<EnumConstantDecl>(Elements[i]);
-    if (!ECD)
-      return;
-
-    Expr *InitExpr = ECD->getInitExpr();
-    if (!InitExpr)
-      return;
-    InitExpr = InitExpr->IgnoreImpCasts();
-    if (!isa<IntegerLiteral>(InitExpr) && !isa<CXXBoolLiteralExpr>(InitExpr))
-      return;
-
-    if (i == 0) {
-      FirstVal = ECD->getInitVal();
-      continue;
-    }
-
-    if (!llvm::APSInt::isSameValue(FirstVal, ECD->getInitVal()))
-      return;
-  }
-
-  S.Diag(Enum->getLocation(), diag::warn_identical_enum_values)
-      << EnumType << FirstVal.toString(10)
-      << Enum->getSourceRange();
-
-  EnumConstantDecl *Last = cast<EnumConstantDecl>(Elements[NumElements - 1]),
-                   *Next = cast<EnumConstantDecl>(Elements[NumElements - 2]);
-
-  S.Diag(Last->getLocation(), diag::note_identical_enum_values)
-    << FixItHint::CreateReplacement(Last->getInitExpr()->getSourceRange(),
-                                    Next->getName());
-}
-
 void Sema::ActOnEnumBody(SourceLocation EnumLoc, SourceLocation LBraceLoc,
                          SourceLocation RBraceLoc, Decl *EnumDeclX,
                          Decl **Elements, unsigned NumElements,
@@ -10682,8 +10796,6 @@ void Sema::ActOnEnumBody(SourceLocation EnumLoc, SourceLocation LBraceLoc,
   // it needs to go into the function scope.
   if (InFunctionDeclarator)
     DeclsInPrototypeScope.push_back(Enum);
-
-  CheckForUniqueEnumValues(*this, Elements, NumElements, Enum, EnumType);
 }
 
 Decl *Sema::ActOnFileScopeAsmDecl(Expr *expr,
@@ -10782,10 +10894,6 @@ Decl *Sema::getObjCDeclContext() const {
 }
 
 AvailabilityResult Sema::getCurContextAvailability() const {
-  const Decl *D = cast<Decl>(getCurLexicalContext());
-  // A category implicitly has the availability of the interface.
-  if (const ObjCCategoryDecl *CatD = dyn_cast<ObjCCategoryDecl>(D))
-    D = CatD->getClassInterface();
-  
+  const Decl *D = cast<Decl>(getCurObjCLexicalContext());
   return D->getAvailability();
 }

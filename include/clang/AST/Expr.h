@@ -220,15 +220,6 @@ public:
   /// Reasons why an expression might not be an l-value.
   LValueClassification ClassifyLValue(ASTContext &Ctx) const;
 
-  /// isModifiableLvalue - C99 6.3.2.1: an lvalue that does not have array type,
-  /// does not have an incomplete type, does not have a const-qualified type,
-  /// and if it is a structure or union, does not have any member (including,
-  /// recursively, any member or element of all contained aggregates or unions)
-  /// with a const-qualified type.
-  ///
-  /// \param Loc [in,out] - A source location which *may* be filled
-  /// in with the location of the expression making this a
-  /// non-modifiable lvalue, if specified.
   enum isModifiableLvalueResult {
     MLV_Valid,
     MLV_NotObjectType,
@@ -247,6 +238,15 @@ public:
     MLV_ClassTemporary,
     MLV_ArrayTemporary
   };
+  /// isModifiableLvalue - C99 6.3.2.1: an lvalue that does not have array type,
+  /// does not have an incomplete type, does not have a const-qualified type,
+  /// and if it is a structure or union, does not have any member (including,
+  /// recursively, any member or element of all contained aggregates or unions)
+  /// with a const-qualified type.
+  ///
+  /// \param Loc [in,out] - A source location which *may* be filled
+  /// in with the location of the expression making this a
+  /// non-modifiable lvalue, if specified.
   isModifiableLvalueResult isModifiableLvalue(ASTContext &Ctx,
                                               SourceLocation *Loc = 0) const;
 
@@ -391,6 +391,9 @@ public:
   /// \brief If this expression is an l-value for an Objective C
   /// property, find the underlying property reference expression.
   const ObjCPropertyRefExpr *getObjCProperty() const;
+
+  /// \brief Check if this expression is the ObjC 'self' implicit parameter.
+  bool isObjCSelfExpr() const;
 
   /// \brief Returns whether this expression refers to a vector element.
   bool refersToVectorElement() const;
@@ -1132,8 +1135,8 @@ class APNumericStorage {
 
   bool hasAllocation() const { return llvm::APInt::getNumWords(BitWidth) > 1; }
 
-  APNumericStorage(const APNumericStorage&); // do not implement
-  APNumericStorage& operator=(const APNumericStorage&); // do not implement
+  APNumericStorage(const APNumericStorage &) LLVM_DELETED_FUNCTION;
+  void operator=(const APNumericStorage &) LLVM_DELETED_FUNCTION;
 
 protected:
   APNumericStorage() : VAL(0), BitWidth(0) { }
@@ -1757,8 +1760,7 @@ private:
 
   OffsetOfExpr(ASTContext &C, QualType type,
                SourceLocation OperatorLoc, TypeSourceInfo *tsi,
-               OffsetOfNode* compsPtr, unsigned numComps,
-               Expr** exprsPtr, unsigned numExprs,
+               ArrayRef<OffsetOfNode> comps, ArrayRef<Expr*> exprs,
                SourceLocation RParenLoc);
 
   explicit OffsetOfExpr(unsigned numComps, unsigned numExprs)
@@ -1769,9 +1771,8 @@ public:
 
   static OffsetOfExpr *Create(ASTContext &C, QualType type,
                               SourceLocation OperatorLoc, TypeSourceInfo *tsi,
-                              OffsetOfNode* compsPtr, unsigned numComps,
-                              Expr** exprsPtr, unsigned numExprs,
-                              SourceLocation RParenLoc);
+                              ArrayRef<OffsetOfNode> comps,
+                              ArrayRef<Expr*> exprs, SourceLocation RParenLoc);
 
   static OffsetOfExpr *CreateEmpty(ASTContext &C,
                                    unsigned NumComps, unsigned NumExprs);
@@ -2041,7 +2042,7 @@ class CallExpr : public Expr {
 protected:
   // These versions of the constructor are for derived classes.
   CallExpr(ASTContext& C, StmtClass SC, Expr *fn, unsigned NumPreArgs,
-           Expr **args, unsigned numargs, QualType t, ExprValueKind VK,
+           ArrayRef<Expr*> args, QualType t, ExprValueKind VK,
            SourceLocation rparenloc);
   CallExpr(ASTContext &C, StmtClass SC, unsigned NumPreArgs, EmptyShell Empty);
 
@@ -2061,7 +2062,7 @@ protected:
   unsigned getNumPreArgs() const { return CallExprBits.NumPreArgs; }
 
 public:
-  CallExpr(ASTContext& C, Expr *fn, Expr **args, unsigned numargs, QualType t,
+  CallExpr(ASTContext& C, Expr *fn, ArrayRef<Expr*> args, QualType t,
            ExprValueKind VK, SourceLocation rparenloc);
 
   /// \brief Build an empty call expression.
@@ -2784,6 +2785,12 @@ public:
 
 private:
   unsigned Opc : 6;
+
+  // Records the FP_CONTRACT pragma status at the point that this binary
+  // operator was parsed. This bit is only meaningful for operations on
+  // floating point types. For all other types it should default to
+  // false.
+  unsigned FPContractable : 1;
   SourceLocation OpLoc;
 
   enum { LHS, RHS, END_EXPR };
@@ -2792,7 +2799,7 @@ public:
 
   BinaryOperator(Expr *lhs, Expr *rhs, Opcode opc, QualType ResTy,
                  ExprValueKind VK, ExprObjectKind OK,
-                 SourceLocation opLoc)
+                 SourceLocation opLoc, bool fpContractable)
     : Expr(BinaryOperatorClass, ResTy, VK, OK,
            lhs->isTypeDependent() || rhs->isTypeDependent(),
            lhs->isValueDependent() || rhs->isValueDependent(),
@@ -2800,7 +2807,7 @@ public:
             rhs->isInstantiationDependent()),
            (lhs->containsUnexpandedParameterPack() ||
             rhs->containsUnexpandedParameterPack())),
-      Opc(opc), OpLoc(opLoc) {
+      Opc(opc), FPContractable(fpContractable), OpLoc(opLoc) {
     SubExprs[LHS] = lhs;
     SubExprs[RHS] = rhs;
     assert(!isCompoundAssignmentOp() &&
@@ -2901,10 +2908,18 @@ public:
     return child_range(&SubExprs[0], &SubExprs[0]+END_EXPR);
   }
 
+  // Set the FP contractability status of this operator. Only meaningful for
+  // operations on floating point types.
+  void setFPContractable(bool FPC) { FPContractable = FPC; }
+
+  // Get the FP contractability status of this operator. Only meaningful for
+  // operations on floating point types.
+  bool isFPContractable() const { return FPContractable; }
+
 protected:
   BinaryOperator(Expr *lhs, Expr *rhs, Opcode opc, QualType ResTy,
                  ExprValueKind VK, ExprObjectKind OK,
-                 SourceLocation opLoc, bool dead)
+                 SourceLocation opLoc, bool fpContractable, bool dead2)
     : Expr(CompoundAssignOperatorClass, ResTy, VK, OK,
            lhs->isTypeDependent() || rhs->isTypeDependent(),
            lhs->isValueDependent() || rhs->isValueDependent(),
@@ -2912,7 +2927,7 @@ protected:
             rhs->isInstantiationDependent()),
            (lhs->containsUnexpandedParameterPack() ||
             rhs->containsUnexpandedParameterPack())),
-      Opc(opc), OpLoc(opLoc) {
+      Opc(opc), FPContractable(fpContractable), OpLoc(opLoc) {
     SubExprs[LHS] = lhs;
     SubExprs[RHS] = rhs;
   }
@@ -2934,8 +2949,9 @@ public:
   CompoundAssignOperator(Expr *lhs, Expr *rhs, Opcode opc, QualType ResType,
                          ExprValueKind VK, ExprObjectKind OK,
                          QualType CompLHSType, QualType CompResultType,
-                         SourceLocation OpLoc)
-    : BinaryOperator(lhs, rhs, opc, ResType, VK, OK, OpLoc, true),
+                         SourceLocation OpLoc, bool fpContractable)
+    : BinaryOperator(lhs, rhs, opc, ResType, VK, OK, OpLoc, fpContractable,
+                     true),
       ComputationLHSType(CompLHSType),
       ComputationResultType(CompResultType) {
     assert(isCompoundAssignmentOp() &&
@@ -3266,9 +3282,8 @@ class ShuffleVectorExpr : public Expr {
   unsigned NumExprs;
 
 public:
-  ShuffleVectorExpr(ASTContext &C, Expr **args, unsigned nexpr,
-                    QualType Type, SourceLocation BLoc,
-                    SourceLocation RP);
+  ShuffleVectorExpr(ASTContext &C, ArrayRef<Expr*> args, QualType Type,
+                    SourceLocation BLoc, SourceLocation RP);
 
   /// \brief Build an empty vector-shuffle expression.
   explicit ShuffleVectorExpr(EmptyShell Empty)
@@ -3308,7 +3323,7 @@ public:
 
   void setExprs(ASTContext &C, Expr ** Exprs, unsigned NumExprs);
 
-  unsigned getShuffleMaskIdx(ASTContext &Ctx, unsigned N) {
+  unsigned getShuffleMaskIdx(ASTContext &Ctx, unsigned N) const {
     assert((N < NumExprs - 2) && "Shuffle idx out of range!");
     return getExpr(N+2)->EvaluateKnownConstInt(Ctx).getZExtValue();
   }
@@ -3528,8 +3543,7 @@ class InitListExpr : public Expr {
 
 public:
   InitListExpr(ASTContext &C, SourceLocation lbraceloc,
-               Expr **initexprs, unsigned numinits,
-               SourceLocation rbraceloc);
+               ArrayRef<Expr*> initExprs, SourceLocation rbraceloc);
 
   /// \brief Build an empty initializer list.
   explicit InitListExpr(ASTContext &C, EmptyShell Empty)
@@ -3723,8 +3737,7 @@ private:
   DesignatedInitExpr(ASTContext &C, QualType Ty, unsigned NumDesignators,
                      const Designator *Designators,
                      SourceLocation EqualOrColonLoc, bool GNUSyntax,
-                     Expr **IndexExprs, unsigned NumIndexExprs,
-                     Expr *Init);
+                     ArrayRef<Expr*> IndexExprs, Expr *Init);
 
   explicit DesignatedInitExpr(unsigned NumSubExprs)
     : Expr(DesignatedInitExprClass, EmptyShell()),
@@ -3885,7 +3898,7 @@ public:
 
   static DesignatedInitExpr *Create(ASTContext &C, Designator *Designators,
                                     unsigned NumDesignators,
-                                    Expr **IndexExprs, unsigned NumIndexExprs,
+                                    ArrayRef<Expr*> IndexExprs,
                                     SourceLocation EqualOrColonLoc,
                                     bool GNUSyntax, Expr *Init);
 
@@ -4032,8 +4045,8 @@ class ParenListExpr : public Expr {
   SourceLocation LParenLoc, RParenLoc;
 
 public:
-  ParenListExpr(ASTContext& C, SourceLocation lparenloc, Expr **exprs,
-                unsigned numexprs, SourceLocation rparenloc);
+  ParenListExpr(ASTContext& C, SourceLocation lparenloc, ArrayRef<Expr*> exprs,
+                SourceLocation rparenloc);
 
   /// \brief Build an empty paren list.
   explicit ParenListExpr(EmptyShell Empty) : Expr(ParenListExprClass, Empty) { }
@@ -4109,18 +4122,18 @@ class GenericSelectionExpr : public Expr {
 public:
   GenericSelectionExpr(ASTContext &Context,
                        SourceLocation GenericLoc, Expr *ControllingExpr,
-                       TypeSourceInfo **AssocTypes, Expr **AssocExprs,
-                       unsigned NumAssocs, SourceLocation DefaultLoc,
-                       SourceLocation RParenLoc,
+                       ArrayRef<TypeSourceInfo*> AssocTypes,
+                       ArrayRef<Expr*> AssocExprs,
+                       SourceLocation DefaultLoc, SourceLocation RParenLoc,
                        bool ContainsUnexpandedParameterPack,
                        unsigned ResultIndex);
 
   /// This constructor is used in the result-dependent case.
   GenericSelectionExpr(ASTContext &Context,
                        SourceLocation GenericLoc, Expr *ControllingExpr,
-                       TypeSourceInfo **AssocTypes, Expr **AssocExprs,
-                       unsigned NumAssocs, SourceLocation DefaultLoc,
-                       SourceLocation RParenLoc,
+                       ArrayRef<TypeSourceInfo*> AssocTypes,
+                       ArrayRef<Expr*> AssocExprs,
+                       SourceLocation DefaultLoc, SourceLocation RParenLoc,
                        bool ContainsUnexpandedParameterPack);
 
   explicit GenericSelectionExpr(EmptyShell Empty)
@@ -4501,7 +4514,7 @@ private:
   friend class ASTStmtReader;
 
 public:
-  AtomicExpr(SourceLocation BLoc, Expr **args, unsigned nexpr, QualType t,
+  AtomicExpr(SourceLocation BLoc, ArrayRef<Expr*> args, QualType t,
              AtomicOp op, SourceLocation RP);
 
   /// \brief Determine the number of arguments the specified atomic builtin

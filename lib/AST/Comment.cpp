@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/Comment.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclObjC.h"
@@ -37,11 +38,12 @@ void Comment::dump() const {
   // in CommentDumper.cpp, that object file would be removed by linker because
   // none of its functions are referenced by other object files, despite the
   // LLVM_ATTRIBUTE_USED.
-  dump(llvm::errs(), NULL);
+  dump(llvm::errs(), NULL, NULL);
 }
 
-void Comment::dump(SourceManager &SM) const {
-  dump(llvm::errs(), &SM);
+void Comment::dump(const ASTContext &Context) const {
+  dump(llvm::errs(), &Context.getCommentCommandTraits(),
+       &Context.getSourceManager());
 }
 
 namespace {
@@ -240,7 +242,50 @@ void DeclInfo::fill() {
   case Decl::Namespace:
     Kind = NamespaceKind;
     break;
-  case Decl::Typedef:
+  case Decl::Typedef: {
+    Kind = TypedefKind;
+    // If this is a typedef to something we consider a function, extract
+    // arguments and return type.
+    const TypedefDecl *TD = cast<TypedefDecl>(ThisDecl);
+    const TypeSourceInfo *TSI = TD->getTypeSourceInfo();
+    if (!TSI)
+      break;
+    TypeLoc TL = TSI->getTypeLoc().getUnqualifiedLoc();
+    while (true) {
+      TL = TL.IgnoreParens();
+      // Look through qualified types.
+      if (QualifiedTypeLoc *QualifiedTL = dyn_cast<QualifiedTypeLoc>(&TL)) {
+        TL = QualifiedTL->getUnqualifiedLoc();
+        continue;
+      }
+      // Look through pointer types.
+      if (PointerTypeLoc *PointerTL = dyn_cast<PointerTypeLoc>(&TL)) {
+        TL = PointerTL->getPointeeLoc().getUnqualifiedLoc();
+        continue;
+      }
+      if (BlockPointerTypeLoc *BlockPointerTL =
+              dyn_cast<BlockPointerTypeLoc>(&TL)) {
+        TL = BlockPointerTL->getPointeeLoc().getUnqualifiedLoc();
+        continue;
+      }
+      if (MemberPointerTypeLoc *MemberPointerTL =
+              dyn_cast<MemberPointerTypeLoc>(&TL)) {
+        TL = MemberPointerTL->getPointeeLoc().getUnqualifiedLoc();
+        continue;
+      }
+      // Is this a typedef for a function type?
+      if (FunctionTypeLoc *FTL = dyn_cast<FunctionTypeLoc>(&TL)) {
+        Kind = FunctionKind;
+        ArrayRef<ParmVarDecl *> Params = FTL->getParams();
+        ParamVars = ArrayRef<const ParmVarDecl *>(Params.data(),
+                                                  Params.size());
+        ResultType = FTL->getResultLoc().getType();
+        break;
+      }
+      break;
+    }
+    break;
+  }
   case Decl::TypeAlias:
     Kind = TypedefKind;
     break;

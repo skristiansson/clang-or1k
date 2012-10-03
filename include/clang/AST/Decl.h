@@ -214,16 +214,19 @@ public:
   bool isCXXInstanceMember() const;
 
   class LinkageInfo {
-    Linkage linkage_;
-    Visibility visibility_;
-    bool explicit_;
+    uint8_t linkage_    : 4;
+    uint8_t visibility_ : 3;
+    uint8_t explicit_   : 1;
 
     void setVisibility(Visibility V, bool E) { visibility_ = V; explicit_ = E; }
   public:
     LinkageInfo() : linkage_(ExternalLinkage), visibility_(DefaultVisibility),
                     explicit_(false) {}
     LinkageInfo(Linkage L, Visibility V, bool E)
-      : linkage_(L), visibility_(V), explicit_(E) {}
+      : linkage_(L), visibility_(V), explicit_(E) {
+      assert(linkage() == L && visibility() == V && visibilityExplicit() == E &&
+             "Enum truncated!");
+    }
 
     static LinkageInfo external() {
       return LinkageInfo();
@@ -238,8 +241,8 @@ public:
       return LinkageInfo(NoLinkage, DefaultVisibility, false);
     }
 
-    Linkage linkage() const { return linkage_; }
-    Visibility visibility() const { return visibility_; }
+    Linkage linkage() const { return (Linkage)linkage_; }
+    Visibility visibility() const { return (Visibility)visibility_; }
     bool visibilityExplicit() const { return explicit_; }
 
     void setLinkage(Linkage L) { linkage_ = L; }
@@ -578,8 +581,8 @@ struct QualifierInfo {
 
 private:
   // Copy constructor and copy assignment are disabled.
-  QualifierInfo(const QualifierInfo&);
-  QualifierInfo& operator=(const QualifierInfo&);
+  QualifierInfo(const QualifierInfo&) LLVM_DELETED_FUNCTION;
+  QualifierInfo& operator=(const QualifierInfo&) LLVM_DELETED_FUNCTION;
 };
 
 /// \brief Represents a ValueDecl that came out of a declarator.
@@ -712,7 +715,7 @@ public:
   typedef clang::StorageClass StorageClass;
 
   /// getStorageClassSpecifierString - Return the string used to
-  /// specify the storage class \arg SC.
+  /// specify the storage class \p SC.
   ///
   /// It is illegal to call this function with SC == None.
   static const char *getStorageClassSpecifierString(StorageClass SC);
@@ -2448,7 +2451,7 @@ public:
 private:
   // FIXME: This can be packed into the bitfields in Decl.
   /// TagDeclKind - The TagKind enum.
-  unsigned TagDeclKind : 2;
+  unsigned TagDeclKind : 3;
 
   /// IsCompleteDefinition - True if this is a definition ("struct foo
   /// {};"), false if it is a declaration ("struct foo;").  It is not
@@ -2625,6 +2628,7 @@ public:
   void setTagKind(TagKind TK) { TagDeclKind = TK; }
 
   bool isStruct() const { return getTagKind() == TTK_Struct; }
+  bool isInterface() const { return getTagKind() == TTK_Interface; }
   bool isClass()  const { return getTagKind() == TTK_Class; }
   bool isUnion()  const { return getTagKind() == TTK_Union; }
   bool isEnum()   const { return getTagKind() == TTK_Enum; }

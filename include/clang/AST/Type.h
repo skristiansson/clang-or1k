@@ -20,6 +20,7 @@
 #include "clang/Basic/Linkage.h"
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/Visibility.h"
+#include "clang/Basic/Specifiers.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/TemplateName.h"
 #include "llvm/Support/type_traits.h"
@@ -159,6 +160,44 @@ public:
   };
 
   Qualifiers() : Mask(0) {}
+
+  /// \brief Returns the common set of qualifiers while removing them from
+  /// the given sets.
+  static Qualifiers removeCommonQualifiers(Qualifiers &L, Qualifiers &R) {
+    // If both are only CVR-qualified, bit operations are sufficient.
+    if (!(L.Mask & ~CVRMask) && !(R.Mask & ~CVRMask)) {
+      Qualifiers Q;
+      Q.Mask = L.Mask & R.Mask;
+      L.Mask &= ~Q.Mask;
+      R.Mask &= ~Q.Mask;
+      return Q;
+    }
+
+    Qualifiers Q;
+    unsigned CommonCRV = L.getCVRQualifiers() & R.getCVRQualifiers();
+    Q.addCVRQualifiers(CommonCRV);
+    L.removeCVRQualifiers(CommonCRV);
+    R.removeCVRQualifiers(CommonCRV);
+
+    if (L.getObjCGCAttr() == R.getObjCGCAttr()) {
+      Q.setObjCGCAttr(L.getObjCGCAttr());
+      L.removeObjCGCAttr();
+      R.removeObjCGCAttr();
+    }
+
+    if (L.getObjCLifetime() == R.getObjCLifetime()) {
+      Q.setObjCLifetime(L.getObjCLifetime());
+      L.removeObjCLifetime();
+      R.removeObjCLifetime();
+    }
+
+    if (L.getAddressSpace() == R.getAddressSpace()) {
+      Q.setAddressSpace(L.getAddressSpace());
+      L.removeAddressSpace();
+      R.removeAddressSpace();
+    }
+    return Q;
+  }
 
   static Qualifiers fromFastMask(unsigned Mask) {
     Qualifiers Qs;
@@ -333,6 +372,23 @@ public:
     }
   }
 
+  /// \brief Remove the qualifiers from the given set from this set.
+  void removeQualifiers(Qualifiers Q) {
+    // If the other set doesn't have any non-boolean qualifiers, just
+    // bit-and the inverse in.
+    if (!(Q.Mask & ~CVRMask))
+      Mask &= ~Q.Mask;
+    else {
+      Mask &= ~(Q.Mask & CVRMask);
+      if (getObjCGCAttr() == Q.getObjCGCAttr())
+        removeObjCGCAttr();
+      if (getObjCLifetime() == Q.getObjCLifetime())
+        removeObjCLifetime();
+      if (getAddressSpace() == Q.getAddressSpace())
+        removeAddressSpace();
+    }
+  }
+
   /// \brief Add the qualifiers from the given set to this set, given that
   /// they don't conflict.
   void addConsistentQualifiers(Qualifiers qs) {
@@ -400,7 +456,7 @@ public:
   }
 
   Qualifiers &operator-=(Qualifiers R) {
-    Mask = Mask & ~(R.Mask);
+    removeQualifiers(R);
     return *this;
   }
 
@@ -433,18 +489,6 @@ private:
   static const uint32_t LifetimeShift = 5;
   static const uint32_t AddressSpaceMask = ~(CVRMask|GCAttrMask|LifetimeMask);
   static const uint32_t AddressSpaceShift = 8;
-};
-
-/// CallingConv - Specifies the calling convention that a function uses.
-enum CallingConv {
-  CC_Default,
-  CC_C,           // __attribute__((cdecl))
-  CC_X86StdCall,  // __attribute__((stdcall))
-  CC_X86FastCall, // __attribute__((fastcall))
-  CC_X86ThisCall, // __attribute__((thiscall))
-  CC_X86Pascal,   // __attribute__((pascal))
-  CC_AAPCS,       // __attribute__((pcs("aapcs")))
-  CC_AAPCS_VFP    // __attribute__((pcs("aapcs-vfp")))
 };
 
 /// A std::pair-like structure for storing a qualified type split
@@ -1126,8 +1170,8 @@ public:
   };
 
 private:
-  Type(const Type&);           // DO NOT IMPLEMENT.
-  void operator=(const Type&); // DO NOT IMPLEMENT.
+  Type(const Type &) LLVM_DELETED_FUNCTION;
+  void operator=(const Type &) LLVM_DELETED_FUNCTION;
 
   /// Bitfields required by the Type class.
   class TypeBitfields {
@@ -1512,6 +1556,7 @@ public:
   bool isRecordType() const;
   bool isClassType() const;
   bool isStructureType() const;
+  bool isInterfaceType() const;
   bool isStructureOrClassType() const;
   bool isUnionType() const;
   bool isComplexIntegerType() const;            // GCC _Complex integer type.
@@ -1630,12 +1675,18 @@ public:
   const ObjCObjectPointerType *getAsObjCQualifiedIdType() const;
   const ObjCObjectPointerType *getAsObjCQualifiedClassType() const;
   const ObjCObjectType *getAsObjCQualifiedInterfaceType() const;
-  const CXXRecordDecl *getCXXRecordDeclForPointerType() const;
 
   /// \brief Retrieves the CXXRecordDecl that this type refers to, either
   /// because the type is a RecordType or because it is the injected-class-name
   /// type of a class template or class template partial specialization.
   CXXRecordDecl *getAsCXXRecordDecl() const;
+
+  /// If this is a pointer or reference to a RecordType, return the
+  /// CXXRecordDecl that that type refers to.
+  ///
+  /// If this is not a pointer or reference, or the type being pointed to does
+  /// not refer to a CXXRecordDecl, returns NULL.
+  const CXXRecordDecl *getPointeeCXXRecordDecl() const;
 
   /// \brief Get the AutoType whose type will be deduced for a variable with
   /// an initializer of this type. This looks through declarators like pointer
@@ -1747,6 +1798,11 @@ public:
 /// \brief This will check for a TypedefType by removing any existing sugar
 /// until it reaches a TypedefType or a non-sugared type.
 template <> const TypedefType *Type::getAs() const;
+
+/// \brief This will check for a TemplateSpecializationType by removing any
+/// existing sugar until it reaches a TemplateSpecializationType or a
+/// non-sugared type.
+template <> const TemplateSpecializationType *Type::getAs() const;
 
 // We can do canonical leaf types faster, because we don't have to
 // worry about preserving child type decoration.
@@ -2676,6 +2732,9 @@ public:
   bool getNoReturnAttr() const { return getExtInfo().getNoReturn(); }
   CallingConv getCallConv() const { return getExtInfo().getCC(); }
   ExtInfo getExtInfo() const { return ExtInfo(FunctionTypeBits.ExtInfo); }
+  bool isConst() const { return getTypeQuals() & Qualifiers::Const; }
+  bool isVolatile() const { return getTypeQuals() & Qualifiers::Volatile; }
+  bool isRestrict() const { return getTypeQuals() & Qualifiers::Restrict; }
 
   /// \brief Determine the type of an expression that calls a function of
   /// this type.
@@ -2969,9 +3028,9 @@ public:
 
   // FIXME: Remove the string version.
   void printExceptionSpecification(std::string &S, 
-                                   PrintingPolicy Policy) const;
+                                   const PrintingPolicy &Policy) const;
   void printExceptionSpecification(raw_ostream &OS, 
-                                   PrintingPolicy Policy) const;
+                                   const PrintingPolicy &Policy) const;
 
   static bool classof(const Type *T) {
     return T->getTypeClass() == FunctionProto;
@@ -3793,6 +3852,8 @@ public:
 enum TagTypeKind {
   /// \brief The "struct" keyword.
   TTK_Struct,
+  /// \brief The "__interface" keyword.
+  TTK_Interface,
   /// \brief The "union" keyword.
   TTK_Union,
   /// \brief The "class" keyword.
@@ -3806,6 +3867,8 @@ enum TagTypeKind {
 enum ElaboratedTypeKeyword {
   /// \brief The "struct" keyword introduces the elaborated-type-specifier.
   ETK_Struct,
+  /// \brief The "__interface" keyword introduces the elaborated-type-specifier.
+  ETK_Interface,
   /// \brief The "union" keyword introduces the elaborated-type-specifier.
   ETK_Union,
   /// \brief The "class" keyword introduces the elaborated-type-specifier.

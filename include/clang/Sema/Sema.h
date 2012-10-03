@@ -187,8 +187,8 @@ typedef std::pair<llvm::PointerUnion<const TemplateTypeParmType*, NamedDecl*>,
 
 /// Sema - This implements semantic analysis and AST building for C.
 class Sema {
-  Sema(const Sema&);           // DO NOT IMPLEMENT
-  void operator=(const Sema&); // DO NOT IMPLEMENT
+  Sema(const Sema &) LLVM_DELETED_FUNCTION;
+  void operator=(const Sema &) LLVM_DELETED_FUNCTION;
   mutable const TargetAttributesSema* TheTargetAttributesSema;
 public:
   typedef OpaquePtr<DeclGroupRef> DeclGroupPtrTy;
@@ -233,6 +233,12 @@ public:
 
   /// VisContext - Manages the stack for \#pragma GCC visibility.
   void *VisContext; // Really a "PragmaVisStack*"
+
+  /// \brief Flag indicating if Sema is building a recovery call expression.
+  ///
+  /// This flag is used to avoid building recovery call expressions
+  /// if Sema is already doing so, which would cause infinite recursions.
+  bool IsBuildingRecoveryCallExpr;
 
   /// ExprNeedsCleanups - True if the current evaluation context
   /// requires cleanups to be run at its conclusion.
@@ -729,6 +735,20 @@ public:
   /// should not be used elsewhere.
   void EmitCurrentDiagnostic(unsigned DiagID);
 
+  /// Records and restores the FP_CONTRACT state on entry/exit of compound
+  /// statements.
+  class FPContractStateRAII {
+  public:
+    FPContractStateRAII(Sema& S)
+      : S(S), OldFPContractState(S.FPFeatures.fp_contract) {}
+    ~FPContractStateRAII() {
+      S.FPFeatures.fp_contract = OldFPContractState;
+    }
+  private:
+    Sema& S;
+    bool OldFPContractState : 1;
+  };
+
 public:
   Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
        TranslationUnitKind TUKind = TU_Complete,
@@ -1203,7 +1223,7 @@ public:
       assert(Kind == NC_TypeTemplate || Kind == NC_FunctionTemplate);
       return Kind == NC_TypeTemplate? TNK_Type_template : TNK_Function_template;
     }
-};
+  };
 
   /// \brief Perform name lookup on the given name, classifying it based on
   /// the results of name lookup and the following token.
@@ -1223,11 +1243,19 @@ public:
   ///
   /// \param NextToken The token following the identifier. Used to help
   /// disambiguate the name.
+  ///
+  /// \param IsAddressOfOperand True if this name is the operand of a unary
+  ///        address of ('&') expression, assuming it is classified as an
+  ///        expression.
+  ///
+  /// \param CCC The correction callback, if typo correction is desired.
   NameClassification ClassifyName(Scope *S,
                                   CXXScopeSpec &SS,
                                   IdentifierInfo *&Name,
                                   SourceLocation NameLoc,
-                                  const Token &NextToken);
+                                  const Token &NextToken,
+                                  bool IsAddressOfOperand,
+                                  CorrectionCandidateCallback *CCC = 0);
 
   Decl *ActOnDeclarator(Scope *S, Declarator &D);
 
@@ -1265,6 +1293,7 @@ public:
                                      MultiTemplateParamsArg TemplateParamLists,
                                      bool &AddToScope);
   bool AddOverriddenMethods(CXXRecordDecl *DC, CXXMethodDecl *MD);
+  void checkVoidParamDecl(ParmVarDecl *Param);
 
   bool CheckConstexprFunctionDecl(const FunctionDecl *FD);
   bool CheckConstexprFunctionBody(const FunctionDecl *FD, Stmt *Body);
@@ -1293,7 +1322,6 @@ public:
   bool SetParamDefaultArgument(ParmVarDecl *Param, Expr *DefaultArg,
                                SourceLocation EqualLoc);
 
-  void CheckSelfReference(Decl *OrigDecl, Expr *E);
   void AddInitializerToDecl(Decl *dcl, Expr *init, bool DirectInit,
                             bool TypeMayContainAuto);
   void ActOnUninitializedDecl(Decl *dcl, bool TypeMayContainAuto);
@@ -1642,7 +1670,7 @@ public:
   /// \brief Checks availability of the function depending on the current
   /// function context.Inside an unavailable function,unavailability is ignored.
   ///
-  /// \returns true if \arg FD is unavailable and current context is inside
+  /// \returns true if \p FD is unavailable and current context is inside
   /// an available function, false otherwise.
   bool isFunctionConsideredUnavailable(FunctionDecl *FD);
 
@@ -1916,6 +1944,30 @@ public:
                                    OverloadCandidateSet &CandidateSet,
                                    bool PartialOverloading = false);
 
+  // An enum used to represent the different possible results of building a
+  // range-based for loop.
+  enum ForRangeStatus {
+    FRS_Success,
+    FRS_NoViableFunction,
+    FRS_DiagnosticIssued
+  };
+
+  // An enum to represent whether something is dealing with a call to begin()
+  // or a call to end() in a range-based for loop.
+  enum BeginEndFunction {
+    BEF_begin,
+    BEF_end
+  };
+
+  ForRangeStatus BuildForRangeBeginEndCall(Scope *S, SourceLocation Loc,
+                                           SourceLocation RangeLoc,
+                                           VarDecl *Decl,
+                                           BeginEndFunction BEF,
+                                           const DeclarationNameInfo &NameInfo,
+                                           LookupResult &MemberLookup,
+                                           OverloadCandidateSet *CandidateSet,
+                                           Expr *Range, ExprResult *CallExpr);
+
   ExprResult BuildOverloadedCallExpr(Scope *S, Expr *Fn,
                                      UnresolvedLookupExpr *ULE,
                                      SourceLocation LParenLoc,
@@ -1923,6 +1975,12 @@ public:
                                      SourceLocation RParenLoc,
                                      Expr *ExecConfig,
                                      bool AllowTypoCorrection=true);
+
+  bool buildOverloadedCallSet(Scope *S, Expr *Fn, UnresolvedLookupExpr *ULE,
+                              Expr **Args, unsigned NumArgs,
+                              SourceLocation RParenLoc,
+                              OverloadCandidateSet *CandidateSet,
+                              ExprResult *Result);
 
   ExprResult CreateOverloadedUnaryOp(SourceLocation OpLoc,
                                      unsigned Opc,
@@ -2148,7 +2206,8 @@ public:
                              bool EnteringContext = false,
                              const ObjCObjectPointerType *OPT = 0);
 
-  void FindAssociatedClassesAndNamespaces(llvm::ArrayRef<Expr *> Args,
+  void FindAssociatedClassesAndNamespaces(SourceLocation InstantiationLoc,
+                                          llvm::ArrayRef<Expr *> Args,
                                    AssociatedNamespaceSet &AssociatedNamespaces,
                                    AssociatedClassSet &AssociatedClasses);
 
@@ -2255,6 +2314,10 @@ public:
   /// its protocols.
   ObjCPropertyDecl *LookupPropertyDecl(const ObjCContainerDecl *CDecl,
                                        IdentifierInfo *II);
+  
+  /// PropertyIfSetterOrGetter - Looks up the property if named declaration
+  /// is a setter or getter method backing a property.
+  ObjCPropertyDecl *PropertyIfSetterOrGetter(NamedDecl *D);
 
   /// Called by ActOnProperty to handle \@property declarations in
   /// class extensions.
@@ -2399,7 +2462,7 @@ public:
     FullExprArg(const FullExprArg& Other) : E(Other.E) {}
 
     ExprResult release() {
-      return move(E);
+      return E;
     }
 
     Expr *get() const { return E; }
@@ -2498,21 +2561,32 @@ public:
   ExprResult CheckObjCForCollectionOperand(SourceLocation forLoc,
                                            Expr *collection);
   StmtResult ActOnObjCForCollectionStmt(SourceLocation ForColLoc,
-                                        SourceLocation LParenLoc,
                                         Stmt *First, Expr *collection,
                                         SourceLocation RParenLoc);
   StmtResult FinishObjCForCollectionStmt(Stmt *ForCollection, Stmt *Body);
 
-  StmtResult ActOnCXXForRangeStmt(SourceLocation ForLoc,
-                                  SourceLocation LParenLoc, Stmt *LoopVar,
+  enum BuildForRangeKind {
+    /// Initial building of a for-range statement.
+    BFRK_Build,
+    /// Instantiation or recovery rebuild of a for-range statement. Don't
+    /// attempt any typo-correction.
+    BFRK_Rebuild,
+    /// Determining whether a for-range statement could be built. Avoid any
+    /// unnecessary or irreversible actions.
+    BFRK_Check
+  };
+
+  StmtResult ActOnCXXForRangeStmt(SourceLocation ForLoc, Stmt *LoopVar,
                                   SourceLocation ColonLoc, Expr *Collection,
-                                  SourceLocation RParenLoc);
+                                  SourceLocation RParenLoc,
+                                  BuildForRangeKind Kind);
   StmtResult BuildCXXForRangeStmt(SourceLocation ForLoc,
                                   SourceLocation ColonLoc,
                                   Stmt *RangeDecl, Stmt *BeginEndDecl,
                                   Expr *Cond, Expr *Inc,
                                   Stmt *LoopVarDecl,
-                                  SourceLocation RParenLoc);
+                                  SourceLocation RParenLoc,
+                                  BuildForRangeKind Kind);
   StmtResult FinishCXXForRangeStmt(Stmt *ForRange, Stmt *Body);
 
   StmtResult ActOnGotoStmt(SourceLocation GotoLoc,
@@ -2530,21 +2604,15 @@ public:
   StmtResult ActOnReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp);
   StmtResult ActOnCapScopeReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp);
 
-  StmtResult ActOnAsmStmt(SourceLocation AsmLoc,
-                          bool IsSimple, bool IsVolatile,
-                          unsigned NumOutputs, unsigned NumInputs,
-                          IdentifierInfo **Names,
-                          MultiExprArg Constraints,
-                          MultiExprArg Exprs,
-                          Expr *AsmString,
-                          MultiExprArg Clobbers,
-                          SourceLocation RParenLoc,
-                          bool MSAsm = false);
+  StmtResult ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
+                             bool IsVolatile, unsigned NumOutputs,
+                             unsigned NumInputs, IdentifierInfo **Names,
+                             MultiExprArg Constraints, MultiExprArg Exprs,
+                             Expr *AsmString, MultiExprArg Clobbers,
+                             SourceLocation RParenLoc);
 
-  StmtResult ActOnMSAsmStmt(SourceLocation AsmLoc,
-                            ArrayRef<Token> AsmToks,
-                            ArrayRef<unsigned> LineEnds,
-                            SourceLocation EndLoc);
+  StmtResult ActOnMSAsmStmt(SourceLocation AsmLoc, SourceLocation LBraceLoc,
+                            ArrayRef<Token> AsmToks, SourceLocation EndLoc);
 
   VarDecl *BuildObjCExceptionDecl(TypeSourceInfo *TInfo, QualType ExceptionType,
                                   SourceLocation StartLoc,
@@ -2641,7 +2709,8 @@ public:
 
   void EmitDeprecationWarning(NamedDecl *D, StringRef Message,
                               SourceLocation Loc,
-                              const ObjCInterfaceDecl *UnknownObjCClass=0);
+                              const ObjCInterfaceDecl *UnknownObjCClass,
+                              const ObjCPropertyDecl  *ObjCProperty);
 
   void HandleDelayedDeprecationCheck(sema::DelayedDiagnostic &DD, Decl *Ctx);
 
@@ -2665,7 +2734,10 @@ public:
   void PushExpressionEvaluationContext(ExpressionEvaluationContext NewContext,
                                        Decl *LambdaContextDecl = 0,
                                        bool IsDecltype = false);
-
+  enum ReuseLambdaContextDecl_t { ReuseLambdaContextDecl };
+  void PushExpressionEvaluationContext(ExpressionEvaluationContext NewContext,
+                                       ReuseLambdaContextDecl_t,
+                                       bool IsDecltype = false);
   void PopExpressionEvaluationContext();
 
   void DiscardCleanupsInEvaluationContext();
@@ -3517,7 +3589,7 @@ public:
   bool CompleteConstructorCall(CXXConstructorDecl *Constructor,
                                MultiExprArg ArgsPtr,
                                SourceLocation Loc,
-                               ASTOwningVector<Expr*> &ConvertedArgs,
+                               SmallVectorImpl<Expr*> &ConvertedArgs,
                                bool AllowExplicit = false);
 
   ParsedType getDestructorName(SourceLocation TildeLoc,
@@ -3993,7 +4065,8 @@ public:
 
   /// \brief Create a new lambda closure type.
   CXXRecordDecl *createLambdaClosureType(SourceRange IntroducerRange,
-                                         bool KnownDependent = false);
+                                         TypeSourceInfo *Info,
+                                         bool KnownDependent);
 
   /// \brief Start the definition of a lambda expression.
   CXXMethodDecl *startLambdaDefinition(CXXRecordDecl *Class,
@@ -4302,7 +4375,7 @@ public:
                                      SourceLocation RParenLoc,
                                      bool Failed);
 
-  FriendDecl *CheckFriendTypeDecl(SourceLocation Loc,
+  FriendDecl *CheckFriendTypeDecl(SourceLocation LocStart,
                                   SourceLocation FriendLoc,
                                   TypeSourceInfo *TSInfo);
   Decl *ActOnFriendTypeDecl(Scope *S, const DeclSpec &DS,
@@ -4427,9 +4500,7 @@ public:
                                      CXXDestructorDecl *Dtor,
                                      const PartialDiagnostic &PDiag,
                                      QualType objectType = QualType());
-  AccessResult CheckDirectMemberAccess(SourceLocation Loc,
-                                       NamedDecl *D,
-                                       const PartialDiagnostic &PDiag);
+  AccessResult CheckFriendAccess(NamedDecl *D);
   AccessResult CheckMemberOperatorAccess(SourceLocation Loc,
                                          Expr *ObjectExpr,
                                          Expr *ArgExpr,
@@ -4465,6 +4536,7 @@ public:
     AbstractParamType,
     AbstractVariableType,
     AbstractFieldType,
+    AbstractIvarType,
     AbstractArrayType
   };
 
@@ -4625,8 +4697,6 @@ public:
 
   /// \brief Parsed an elaborated-type-specifier that refers to a template-id,
   /// such as \c class T::template apply<U>.
-  ///
-  /// \param TUK
   TypeResult ActOnTagTemplateIdType(TagUseKind TUK,
                                     TypeSpecifierType TagSpec,
                                     SourceLocation TagLoc,
@@ -4802,7 +4872,8 @@ public:
                                    TemplateArgument &Converted,
                                CheckTemplateArgumentKind CTAK = CTAK_Specified);
   bool CheckTemplateArgument(TemplateTemplateParmDecl *Param,
-                             const TemplateArgumentLoc &Arg);
+                             const TemplateArgumentLoc &Arg,
+                             unsigned ArgumentPackIndex);
 
   ExprResult
   BuildExpressionFromDeclTemplateArgument(const TemplateArgument &Arg,
@@ -5249,6 +5320,8 @@ public:
   enum TemplateDeductionResult {
     /// \brief Template argument deduction was successful.
     TDK_Success = 0,
+    /// \brief The declaration was invalid; do nothing.
+    TDK_Invalid,
     /// \brief Template argument deduction exceeded the maximum template
     /// instantiation depth (which has already been diagnosed).
     TDK_InstantiationDepth,
@@ -5684,10 +5757,10 @@ public:
     bool CheckInstantiationDepth(SourceLocation PointOfInstantiation,
                                  SourceRange InstantiationRange);
 
-    InstantiatingTemplate(const InstantiatingTemplate&); // not implemented
+    InstantiatingTemplate(const InstantiatingTemplate&) LLVM_DELETED_FUNCTION;
 
     InstantiatingTemplate&
-    operator=(const InstantiatingTemplate&); // not implemented
+    operator=(const InstantiatingTemplate&) LLVM_DELETED_FUNCTION;
   };
 
   void PrintInstantiationStack();
@@ -6019,7 +6092,7 @@ public:
 
   /// Ensure attributes are consistent with type.
   /// \param [in, out] Attributes The attributes to check; they will
-  /// be modified to be consistent with \arg PropertyTy.
+  /// be modified to be consistent with \p PropertyTy.
   void CheckObjCPropertyAttributes(Decl *PropertyPtrTy,
                                    SourceLocation Loc,
                                    unsigned &Attributes,
@@ -6751,6 +6824,7 @@ public:
   /// might create an obvious retain cycle.
   void checkRetainCycles(ObjCMessageExpr *msg);
   void checkRetainCycles(Expr *receiver, Expr *argument);
+  void checkRetainCycles(VarDecl *Var, Expr *Init);
 
   /// checkUnsafeAssigns - Check whether +1 expr is being assigned
   /// to weak/__unsafe_unretained type.
@@ -6766,6 +6840,7 @@ public:
   /// \return true iff there were any incompatible types.
   bool CheckMessageArgumentTypes(QualType ReceiverType,
                                  Expr **Args, unsigned NumArgs, Selector Sel,
+                                 ArrayRef<SourceLocation> SelectorLocs,
                                  ObjCMethodDecl *Method, bool isClassMessage,
                                  bool isSuperMessage,
                                  SourceLocation lbrac, SourceLocation rbrac,
@@ -7148,6 +7223,42 @@ private:
   void CheckBitFieldInitialization(SourceLocation InitLoc, FieldDecl *Field,
                                    Expr *Init);
 
+public:
+  /// \brief Register a magic integral constant to be used as a type tag.
+  void RegisterTypeTagForDatatype(const IdentifierInfo *ArgumentKind,
+                                  uint64_t MagicValue, QualType Type,
+                                  bool LayoutCompatible, bool MustBeNull);
+
+  struct TypeTagData {
+    TypeTagData() {}
+
+    TypeTagData(QualType Type, bool LayoutCompatible, bool MustBeNull) :
+        Type(Type), LayoutCompatible(LayoutCompatible),
+        MustBeNull(MustBeNull)
+    {}
+
+    QualType Type;
+
+    /// If true, \c Type should be compared with other expression's types for
+    /// layout-compatibility.
+    unsigned LayoutCompatible : 1;
+    unsigned MustBeNull : 1;
+  };
+
+  /// A pair of ArgumentKind identifier and magic value.  This uniquely
+  /// identifies the magic value.
+  typedef std::pair<const IdentifierInfo *, uint64_t> TypeTagMagicValue;
+
+private:
+  /// \brief A map from magic value to type information.
+  OwningPtr<llvm::DenseMap<TypeTagMagicValue, TypeTagData> >
+      TypeTagForDatatypeMagicValues;
+
+  /// \brief Peform checks on a call of a function with argument_with_type_tag
+  /// or pointer_with_type_tag attributes.
+  void CheckArgumentWithTypeTag(const ArgumentWithTypeTagAttr *Attr,
+                                const Expr * const *ExprArgs);
+
   /// \brief The parser's current scope.
   ///
   /// The parser maintains this state here.
@@ -7177,6 +7288,14 @@ public:
   }
 
   AvailabilityResult getCurContextAvailability() const;
+  
+  const DeclContext *getCurObjCLexicalContext() const {
+    const DeclContext *DC = getCurLexicalContext();
+    // A category implicitly has the attribute of the interface.
+    if (const ObjCCategoryDecl *CatD = dyn_cast<ObjCCategoryDecl>(DC))
+      DC = CatD->getClassInterface();
+    return DC;
+  }
 };
 
 /// \brief RAII object that enters a new expression evaluation context.
@@ -7190,6 +7309,15 @@ public:
                                    bool IsDecltype = false)
     : Actions(Actions) {
     Actions.PushExpressionEvaluationContext(NewContext, LambdaContextDecl,
+                                            IsDecltype);
+  }
+  EnterExpressionEvaluationContext(Sema &Actions,
+                                   Sema::ExpressionEvaluationContext NewContext,
+                                   Sema::ReuseLambdaContextDecl_t,
+                                   bool IsDecltype = false)
+    : Actions(Actions) {
+    Actions.PushExpressionEvaluationContext(NewContext, 
+                                            Sema::ReuseLambdaContextDecl,
                                             IsDecltype);
   }
 

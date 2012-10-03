@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 %s -fsyntax-only -verify
+// RUN: %clang_cc1 %s -fsyntax-only -triple i386-unknown-unknown -verify
 
 void __attribute__((fastcall)) foo(float *a) { 
 }
@@ -35,6 +35,15 @@ void (__attribute__((cdecl)) *pctest2)() = ctest2;
 
 typedef void (__attribute__((fastcall)) *Handler) (float *);
 Handler H = foo;
+
+int __attribute__((pcs("aapcs", "aapcs"))) pcs1(void); // expected-error {{attribute takes one argument}}
+int __attribute__((pcs())) pcs2(void); // expected-error {{attribute takes one argument}}
+int __attribute__((pcs(pcs1))) pcs3(void); // expected-error {{attribute takes one argument}}
+int __attribute__((pcs(0))) pcs4(void); // expected-error {{'pcs' attribute requires parameter 1 to be a string}}
+/* These are ignored because the target is i386 and not ARM */
+int __attribute__((pcs("aapcs"))) pcs5(void); // expected-warning {{calling convention 'pcs' ignored for this target}}
+int __attribute__((pcs("aapcs-vfp"))) pcs6(void); // expected-warning {{calling convention 'pcs' ignored for this target}}
+int __attribute__((pcs("foo"))) pcs7(void); // expected-error {{Invalid PCS type}}
 
 // PR6361
 void ctest3();

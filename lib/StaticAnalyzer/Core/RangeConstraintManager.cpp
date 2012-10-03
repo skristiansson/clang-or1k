@@ -296,7 +296,7 @@ namespace {
 class RangeConstraintManager : public SimpleConstraintManager{
   RangeSet GetRange(ProgramStateRef state, SymbolRef sym);
 public:
-  RangeConstraintManager(SubEngine &subengine, BasicValueFactory &BVF)
+  RangeConstraintManager(SubEngine *subengine, BasicValueFactory &BVF)
     : SimpleConstraintManager(subengine, BVF) {}
 
   ProgramStateRef assumeSymNE(ProgramStateRef state, SymbolRef sym,
@@ -325,12 +325,6 @@ public:
 
   const llvm::APSInt* getSymVal(ProgramStateRef St, SymbolRef sym) const;
 
-  // FIXME: Refactor into SimpleConstraintManager?
-  bool isEqual(ProgramStateRef St, SymbolRef sym, const llvm::APSInt& V) const {
-    const llvm::APSInt *i = getSymVal(St, sym);
-    return i ? *i == V : false;
-  }
-
   ProgramStateRef removeDeadBindings(ProgramStateRef St, SymbolReaper& SymReaper);
 
   void print(ProgramStateRef St, raw_ostream &Out,
@@ -343,7 +337,7 @@ private:
 } // end anonymous namespace
 
 ConstraintManager *
-ento::CreateRangeConstraintManager(ProgramStateManager &StMgr, SubEngine &Eng) {
+ento::CreateRangeConstraintManager(ProgramStateManager &StMgr, SubEngine *Eng) {
   return new RangeConstraintManager(Eng, StMgr.getBasicVals());
 }
 
@@ -379,8 +373,18 @@ RangeConstraintManager::GetRange(ProgramStateRef state, SymbolRef sym) {
   // Lazily generate a new RangeSet representing all possible values for the
   // given symbol type.
   BasicValueFactory &BV = getBasicVals();
-  QualType T = sym->getType(BV.getContext());
-  return RangeSet(F, BV.getMinValue(T), BV.getMaxValue(T));
+  QualType T = sym->getType();
+
+  RangeSet Result(F, BV.getMinValue(T), BV.getMaxValue(T));
+
+  // Special case: references are known to be non-zero.
+  if (T->isReferenceType()) {
+    APSIntType IntType = BV.getAPSIntType(T);
+    Result = Result.Intersect(BV, F, ++IntType.getZeroValue(),
+                                     --IntType.getZeroValue());
+  }
+
+  return Result;
 }
 
 //===------------------------------------------------------------------------===

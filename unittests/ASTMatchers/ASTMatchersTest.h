@@ -18,7 +18,7 @@ namespace clang {
 namespace ast_matchers {
 
 using clang::tooling::newFrontendActionFactory;
-using clang::tooling::runToolOnCode;
+using clang::tooling::runToolOnCodeWithArgs;
 using clang::tooling::FrontendActionFactory;
 
 class BoundNodesCallback {
@@ -51,12 +51,15 @@ private:
 template <typename T>
 testing::AssertionResult matchesConditionally(const std::string &Code,
                                               const T &AMatcher,
-                                              bool ExpectMatch) {
+                                              bool ExpectMatch,
+                                              llvm::StringRef CompileArg) {
   bool Found = false;
   MatchFinder Finder;
   Finder.addMatcher(AMatcher, new VerifyMatch(0, &Found));
   OwningPtr<FrontendActionFactory> Factory(newFrontendActionFactory(&Finder));
-  if (!runToolOnCode(Factory->create(), Code)) {
+  // Some tests use typeof, which is a gnu extension.
+  std::vector<std::string> Args(1, CompileArg);
+  if (!runToolOnCodeWithArgs(Factory->create(), Code, Args)) {
     return testing::AssertionFailure() << "Parsing error in \"" << Code << "\"";
   }
   if (!Found && ExpectMatch) {
@@ -71,13 +74,13 @@ testing::AssertionResult matchesConditionally(const std::string &Code,
 
 template <typename T>
 testing::AssertionResult matches(const std::string &Code, const T &AMatcher) {
-  return matchesConditionally(Code, AMatcher, true);
+  return matchesConditionally(Code, AMatcher, true, "-std=c++11");
 }
 
 template <typename T>
 testing::AssertionResult notMatches(const std::string &Code,
                                     const T &AMatcher) {
-  return matchesConditionally(Code, AMatcher, false);
+  return matchesConditionally(Code, AMatcher, false, "-std=c++11");
 }
 
 template <typename T>
@@ -91,7 +94,9 @@ matchAndVerifyResultConditionally(const std::string &Code, const T &AMatcher,
   Finder.addMatcher(
       AMatcher, new VerifyMatch(FindResultVerifier, &VerifiedResult));
   OwningPtr<FrontendActionFactory> Factory(newFrontendActionFactory(&Finder));
-  if (!runToolOnCode(Factory->create(), Code)) {
+  // Some tests use typeof, which is a gnu extension.
+  std::vector<std::string> Args(1, "-std=gnu++98");
+  if (!runToolOnCodeWithArgs(Factory->create(), Code, Args)) {
     return testing::AssertionFailure() << "Parsing error in \"" << Code << "\"";
   }
   if (!VerifiedResult && ExpectResult) {

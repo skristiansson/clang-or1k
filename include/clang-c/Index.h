@@ -383,7 +383,7 @@ CINDEX_LINKAGE unsigned clang_equalRanges(CXSourceRange range1,
                                           CXSourceRange range2);
 
 /**
- * \brief Returns non-zero if \arg range is null.
+ * \brief Returns non-zero if \p range is null.
  */
 CINDEX_LINKAGE int clang_Range_isNull(CXSourceRange range);
 
@@ -1904,9 +1904,10 @@ enum CXCursorKind {
    */
   CXCursor_ReturnStmt                    = 214,
 
-  /** \brief A GNU inline assembly statement extension.
+  /** \brief A GCC inline assembly statement extension.
    */
-  CXCursor_AsmStmt                       = 215,
+  CXCursor_GCCAsmStmt                    = 215,
+  CXCursor_AsmStmt                       = CXCursor_GCCAsmStmt,
 
   /** \brief Objective-C's overall \@try-\@catch-\@finally statement.
    */
@@ -2040,7 +2041,8 @@ typedef struct {
  * \brief A comment AST node.
  */
 typedef struct {
-  const void *Data;
+  const void *ASTNode;
+  CXTranslationUnit TranslationUnit;
 } CXComment;
 
 /**
@@ -2068,9 +2070,9 @@ CINDEX_LINKAGE CXCursor clang_getTranslationUnitCursor(CXTranslationUnit);
 CINDEX_LINKAGE unsigned clang_equalCursors(CXCursor, CXCursor);
 
 /**
- * \brief Returns non-zero if \arg cursor is null.
+ * \brief Returns non-zero if \p cursor is null.
  */
-CINDEX_LINKAGE int clang_Cursor_isNull(CXCursor);
+CINDEX_LINKAGE int clang_Cursor_isNull(CXCursor cursor);
 
 /**
  * \brief Compute a hash value for the given cursor.
@@ -3272,7 +3274,7 @@ enum CXCommentKind {
    * \brief A \\param or \\arg command that describes the function parameter
    * (name, passing direction, description).
    *
-   * \brief For example: \\param [in] ParamName description.
+   * For example: \\param [in] ParamName description.
    */
   CXComment_ParamCommand = 7,
 
@@ -3280,7 +3282,7 @@ enum CXCommentKind {
    * \brief A \\tparam command that describes a template parameter (name and
    * description).
    *
-   * \brief For example: \\tparam T description.
+   * For example: \\tparam T description.
    */
   CXComment_TParamCommand = 8,
 
@@ -3379,7 +3381,7 @@ CINDEX_LINKAGE unsigned clang_Comment_getNumChildren(CXComment Comment);
 /**
  * \param Comment AST node of any kind.
  *
- * \param ArgIdx argument index (zero-based).
+ * \param ChildIdx child index (zero-based).
  *
  * \returns the specified child of the AST node.
  */
@@ -3692,14 +3694,11 @@ CINDEX_LINKAGE CXString clang_FullComment_getAsHTML(CXComment Comment);
  * A Relax NG schema for the XML can be found in comment-xml-schema.rng file
  * inside clang source tree.
  *
- * \param TU the translation unit \c Comment belongs to.
- *
  * \param Comment a \c CXComment_FullComment AST node.
  *
  * \returns string containing an XML document.
  */
-CINDEX_LINKAGE CXString clang_FullComment_getAsXML(CXTranslationUnit TU,
-                                                   CXComment Comment);
+CINDEX_LINKAGE CXString clang_FullComment_getAsXML(CXComment Comment);
 
 /**
  * @}
@@ -4323,8 +4322,7 @@ clang_getCompletionAnnotation(CXCompletionString completion_string,
  * \param completion_string The code completion string whose parent is
  * being queried.
  *
- * \param kind If non-NULL, will be set to the kind of the parent context,
- * or CXCursor_NotImplemented if there is no context.
+ * \param kind DEPRECATED: always set to CXCursor_NotImplemented if non-NULL.
  *
  * \returns The name of the completion parent, e.g., "NSObject" if
  * the completion string represents a method in the NSObject class.
@@ -4923,16 +4921,35 @@ typedef struct {
  * \brief Data for IndexerCallbacks#importedASTFile.
  */
 typedef struct {
+  /**
+   * \brief Top level AST file containing the imported PCH, module or submodule.
+   */
   CXFile file;
   /**
-   * \brief Location where the file is imported. It is useful mostly for
-   * modules.
+   * \brief Location where the file is imported. Applicable only for modules.
    */
   CXIdxLoc loc;
   /**
    * \brief Non-zero if the AST file is a module otherwise it's a PCH.
    */
   int isModule;
+  /**
+   * \brief Non-zero if an inclusion directive was automatically turned into
+   * a module import.
+   */
+  int isIncludeDirective;
+  /**
+   * \brief The name of the file being included or the module being imported,
+   * as written in the source code.
+   */
+  const char *sourceName;
+  /**
+   * \brief The actual name of the module or submodule being imported.
+   * The syntax is a sequence of identifiers separated by dots, e.g "std.vector"
+   * Applicable only for modules.
+   */
+  const char *moduleName;
+
 } CXIdxImportedASTFileInfo;
 
 typedef enum {
@@ -4965,7 +4982,8 @@ typedef enum {
   CXIdxEntity_CXXConstructor        = 22,
   CXIdxEntity_CXXDestructor         = 23,
   CXIdxEntity_CXXConversionFunction = 24,
-  CXIdxEntity_CXXTypeAlias          = 25
+  CXIdxEntity_CXXTypeAlias          = 25,
+  CXIdxEntity_CXXInterface          = 26
 
 } CXIdxEntityKind;
 
@@ -5183,8 +5201,8 @@ typedef struct {
    * 
    * AST files will not get indexed (there will not be callbacks to index all
    * the entities in an AST file). The recommended action is that, if the AST
-   * file is not already indexed, to block further indexing and initiate a new
-   * indexing job specific to the AST file.
+   * file is not already indexed, to initiate a new indexing job specific to
+   * the AST file.
    */
   CXIdxClientASTFile (*importedASTFile)(CXClientData client_data,
                                         const CXIdxImportedASTFileInfo *);

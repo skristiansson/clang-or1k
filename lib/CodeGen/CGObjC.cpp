@@ -613,7 +613,16 @@ PropertyImplStrategy::PropertyImplStrategy(CodeGenModule &CGM,
     // which translates to objc_storeStrong.  This isn't required, but
     // it's slightly nicer.
     } else if (CGM.getLangOpts().ObjCAutoRefCount && !IsAtomic) {
-      Kind = Expression;
+      // Using standard expression emission for the setter is only
+      // acceptable if the ivar is __strong, which won't be true if
+      // the property is annotated with __attribute__((NSObject)).
+      // TODO: falling all the way back to objc_setProperty here is
+      // just laziness, though;  we could still use objc_storeStrong
+      // if we hacked it right.
+      if (ivarType.getObjCLifetime() == Qualifiers::OCL_Strong)
+        Kind = Expression;
+      else
+        Kind = SetPropertyAndExpressionGet;
       return;
 
     // Otherwise, we need to at least use setProperty.  However, if
@@ -1032,12 +1041,7 @@ static bool hasTrivialSetExpr(const ObjCPropertyImplDecl *PID) {
 static bool UseOptimizedSetter(CodeGenModule &CGM) {
   if (CGM.getLangOpts().getGC() != LangOptions::NonGC)
     return false;
-  const TargetInfo &Target = CGM.getContext().getTargetInfo();
-
-  if (Target.getPlatformName() != "macosx")
-    return false;
-
-  return Target.getPlatformMinVersion() >= VersionTuple(10, 8);
+  return CGM.getLangOpts().ObjCRuntime.hasOptimizedSetter();
 }
 
 void
@@ -1097,7 +1101,7 @@ CodeGenFunction::generateObjCSetterBody(const ObjCImplementationDecl *classImpl,
     llvm::Value *setOptimizedPropertyFn = 0;
     llvm::Value *setPropertyFn = 0;
     if (UseOptimizedSetter(CGM)) {
-      // 10.8 code and GC is off
+      // 10.8 and iOS 6.0 code and GC is off
       setOptimizedPropertyFn = 
         CGM.getObjCRuntime()
            .GetOptimizedPropertySetFunction(strategy.isAtomic(),
@@ -1209,7 +1213,7 @@ CodeGenFunction::generateObjCSetterBody(const ObjCImplementationDecl *classImpl,
 
   BinaryOperator assign(&ivarRef, finalArg, BO_Assign,
                         ivarRef.getType(), VK_RValue, OK_Ordinary,
-                        SourceLocation());
+                        SourceLocation(), false);
   EmitStmt(&assign);
 }
 
@@ -1697,7 +1701,7 @@ static llvm::Constant *createARCRuntimeFunction(CodeGenModule &CGM,
   // references to the runtime support library.  We don't really
   // permit this to fail, but we need a particular relocation style.
   if (llvm::Function *f = dyn_cast<llvm::Function>(fn)) {
-    if (!CGM.getLangOpts().ObjCRuntime.hasARC())
+    if (!CGM.getLangOpts().ObjCRuntime.hasNativeARC())
       f->setLinkage(llvm::Function::ExternalWeakLinkage);
     // set nonlazybind attribute for these APIs for performance.
     if (fnName == "objc_retain" || fnName  == "objc_release")
@@ -2730,7 +2734,7 @@ void CodeGenFunction::EmitObjCAutoreleasePoolStmt(
 
   // Keep track of the current cleanup stack depth.
   RunCleanupsScope Scope(*this);
-  if (CGM.getLangOpts().ObjCRuntime.hasARC()) {
+  if (CGM.getLangOpts().ObjCRuntime.hasNativeARC()) {
     llvm::Value *token = EmitObjCAutoreleasePoolPush();
     EHStack.pushCleanup<CallObjCAutoreleasePoolObject>(NormalCleanup, token);
   } else {
@@ -2845,8 +2849,8 @@ CodeGenFunction::GenerateObjCAtomicSetterCopyHelperFunction(
   Expr *Args[2] = { &DST, &SRC };
   CallExpr *CalleeExp = cast<CallExpr>(PID->getSetterCXXAssignment());
   CXXOperatorCallExpr TheCall(C, OO_Equal, CalleeExp->getCallee(),
-                              Args, 2, DestTy->getPointeeType(), 
-                              VK_LValue, SourceLocation());
+                              Args, DestTy->getPointeeType(),
+                              VK_LValue, SourceLocation(), false);
   
   EmitStmt(&TheCall);
 
@@ -2940,7 +2944,7 @@ CodeGenFunction::GenerateObjCAtomicGetterCopyHelperFunction(
     CXXConstructExpr::Create(C, Ty, SourceLocation(),
                              CXXConstExpr->getConstructor(),
                              CXXConstExpr->isElidable(),
-                             &ConstructorArgs[0], ConstructorArgs.size(),
+                             ConstructorArgs,
                              CXXConstExpr->hadMultipleCandidates(),
                              CXXConstExpr->isListInitialization(),
                              CXXConstExpr->requiresZeroInitialization(),

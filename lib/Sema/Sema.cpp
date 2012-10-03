@@ -43,22 +43,6 @@
 using namespace clang;
 using namespace sema;
 
-FunctionScopeInfo::~FunctionScopeInfo() { }
-
-void FunctionScopeInfo::Clear() {
-  HasBranchProtectedScope = false;
-  HasBranchIntoScope = false;
-  HasIndirectGoto = false;
-  
-  SwitchStack.clear();
-  Returns.clear();
-  ErrorTrap.reset();
-  PossiblyUnreachableDiags.clear();
-}
-
-BlockScopeInfo::~BlockScopeInfo() { }
-LambdaScopeInfo::~LambdaScopeInfo() { }
-
 PrintingPolicy Sema::getPrintingPolicy(const ASTContext &Context,
                                        const Preprocessor &PP) {
   PrintingPolicy Policy = Context.getPrintingPolicy();
@@ -90,6 +74,7 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
     CollectStats(false), ExternalSource(0), CodeCompleter(CodeCompleter),
     CurContext(0), OriginalLexicalContext(0),
     PackContext(0), MSStructPragmaOn(false), VisContext(0),
+    IsBuildingRecoveryCallExpr(false),
     ExprNeedsCleanups(false), LateTemplateParser(0), OpaqueParser(0),
     IdResolver(pp), StdInitializerList(0), CXXTypeInfoDecl(0), MSVCGuidDecl(0),
     NSNumberDecl(0),
@@ -506,6 +491,11 @@ static bool IsRecordFullyDefined(const CXXRecordDecl *RD,
 void Sema::ActOnEndOfTranslationUnit() {
   assert(DelayedDiagnostics.getCurrentPool() == NULL
          && "reached end of translation unit with a pool attached?");
+
+  // If code completion is enabled, don't perform any end-of-translation-unit
+  // work.
+  if (PP.isCodeCompletionEnabled())
+    return;
 
   // Only complete translation units define vtables and perform implicit
   // instantiations.
@@ -1021,6 +1011,9 @@ LambdaScopeInfo *Sema::getCurLambda() {
 }
 
 void Sema::ActOnComment(SourceRange Comment) {
+  if (!LangOpts.RetainCommentsFromSystemHeaders &&
+      SourceMgr.isInSystemHeader(Comment.getBegin()))
+    return;
   RawComment RC(SourceMgr, Comment);
   if (RC.isAlmostTrailingComment()) {
     SourceRange MagicMarkerRange(Comment.getBegin(),
@@ -1237,8 +1230,7 @@ bool Sema::tryToRecoverWithCall(ExprResult &E, const PartialDiagnostic &PD,
     // FIXME: Try this before emitting the fixit, and suppress diagnostics
     // while doing so.
     E = ActOnCallExpr(0, E.take(), ParenInsertionLoc,
-                      MultiExprArg(*this, 0, 0),
-                      ParenInsertionLoc.getLocWithOffset(1));
+                      MultiExprArg(), ParenInsertionLoc.getLocWithOffset(1));
     return true;
   }
 

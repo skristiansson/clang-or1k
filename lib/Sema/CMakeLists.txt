@@ -1,3 +1,10 @@
+set(LLVM_LINK_COMPONENTS
+  ${LLVM_TARGETS_TO_BUILD}
+  asmparser
+  support
+  mc
+  )
+
 add_clang_library(clangSema
   AnalysisBasedWarnings.cpp
   AttributeList.cpp
@@ -7,6 +14,7 @@ add_clang_library(clangSema
   IdentifierResolver.cpp
   JumpDiagnostics.cpp
   Scope.cpp
+  ScopeInfo.cpp
   Sema.cpp
   SemaAccess.cpp
   SemaAttr.cpp
@@ -32,6 +40,7 @@ add_clang_library(clangSema
   SemaOverload.cpp
   SemaPseudoObject.cpp
   SemaStmt.cpp
+  SemaStmtAsm.cpp
   SemaStmtAttr.cpp
   SemaTemplate.cpp
   SemaTemplateDeduction.cpp

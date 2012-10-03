@@ -30,17 +30,15 @@ using namespace clang;
 namespace  {
   class StmtPrinter : public StmtVisitor<StmtPrinter> {
     raw_ostream &OS;
-    ASTContext &Context;
     unsigned IndentLevel;
     clang::PrinterHelper* Helper;
     PrintingPolicy Policy;
 
   public:
-    StmtPrinter(raw_ostream &os, ASTContext &C, PrinterHelper* helper,
+    StmtPrinter(raw_ostream &os, PrinterHelper* helper,
                 const PrintingPolicy &Policy,
                 unsigned Indentation = 0)
-      : OS(os), Context(C), IndentLevel(Indentation), Helper(helper),
-        Policy(Policy) {}
+      : OS(os), IndentLevel(Indentation), Helper(helper), Policy(Policy) {}
 
     void PrintStmt(Stmt *S) {
       PrintStmt(S, Policy.Indentation);
@@ -181,7 +179,7 @@ void StmtPrinter::VisitAttributedStmt(AttributedStmt *Node) {
       first = false;
     }
     // TODO: check this
-    (*it)->printPretty(OS, Context);
+    (*it)->printPretty(OS, Policy);
   }
   OS << "]] ";
   PrintStmt(Node->getSubStmt(), 0);
@@ -368,7 +366,7 @@ void StmtPrinter::VisitReturnStmt(ReturnStmt *Node) {
 }
 
 
-void StmtPrinter::VisitAsmStmt(AsmStmt *Node) {
+void StmtPrinter::VisitGCCAsmStmt(GCCAsmStmt *Node) {
   Indent() << "asm ";
 
   if (Node->isVolatile())
@@ -424,7 +422,7 @@ void StmtPrinter::VisitAsmStmt(AsmStmt *Node) {
     if (i != 0)
       OS << ", ";
 
-    VisitStringLiteral(Node->getClobber(i));
+    VisitStringLiteral(Node->getClobberStringLiteral(i));
   }
 
   OS << ");\n";
@@ -432,7 +430,12 @@ void StmtPrinter::VisitAsmStmt(AsmStmt *Node) {
 
 void StmtPrinter::VisitMSAsmStmt(MSAsmStmt *Node) {
   // FIXME: Implement MS style inline asm statement printer.
-  Indent() << "asm ()";
+  Indent() << "__asm ";
+  if (Node->hasBraces())
+    OS << "{\n";
+  OS << *(Node->getAsmString()) << "\n";
+  if (Node->hasBraces())
+    Indent() << "}\n";
 }
 
 void StmtPrinter::VisitObjCAtTryStmt(ObjCAtTryStmt *Node) {
@@ -731,10 +734,30 @@ void StmtPrinter::VisitIntegerLiteral(IntegerLiteral *Node) {
   case BuiltinType::UInt128:   OS << "Ui128"; break;
   }
 }
-void StmtPrinter::VisitFloatingLiteral(FloatingLiteral *Node) {
+
+static void PrintFloatingLiteral(raw_ostream &OS, FloatingLiteral *Node,
+                                 bool PrintSuffix) {
   SmallString<16> Str;
   Node->getValue().toString(Str);
   OS << Str;
+  if (Str.find_first_not_of("-0123456789") == StringRef::npos)
+    OS << '.'; // Trailing dot in order to separate from ints.
+
+  if (!PrintSuffix)
+    return;
+
+  // Emit suffixes.  Float literals are always a builtin float type.
+  switch (Node->getType()->getAs<BuiltinType>()->getKind()) {
+  default: llvm_unreachable("Unexpected type for float literal!");
+  case BuiltinType::Half:       break; // FIXME: suffix?
+  case BuiltinType::Double:     break; // no suffix.
+  case BuiltinType::Float:      OS << 'F'; break;
+  case BuiltinType::LongDouble: OS << 'L'; break;
+  }
+}
+
+void StmtPrinter::VisitFloatingLiteral(FloatingLiteral *Node) {
+  PrintFloatingLiteral(OS, Node, /*PrintSuffix=*/true);
 }
 
 void StmtPrinter::VisitImaginaryLiteral(ImaginaryLiteral *Node) {
@@ -1214,7 +1237,12 @@ void StmtPrinter::VisitUserDefinedLiteral(UserDefinedLiteral *Node) {
     OS << Int->getValue().toString(10, /*isSigned*/false);
     break;
   }
-  case UserDefinedLiteral::LOK_Floating:
+  case UserDefinedLiteral::LOK_Floating: {
+    // Print floating literal without suffix.
+    FloatingLiteral *Float = cast<FloatingLiteral>(Node->getCookedLiteral());
+    PrintFloatingLiteral(OS, Float, /*PrintSuffix=*/false);
+    break;
+  }
   case UserDefinedLiteral::LOK_String:
   case UserDefinedLiteral::LOK_Character:
     PrintExpr(Node->getCookedLiteral());
@@ -1390,7 +1418,7 @@ void StmtPrinter::VisitCXXNewExpr(CXXNewExpr *E) {
   std::string TypeS;
   if (Expr *Size = E->getArraySize()) {
     llvm::raw_string_ostream s(TypeS);
-    Size->printPretty(s, Context, Helper, Policy);
+    Size->printPretty(s, Helper, Policy);
     s.flush();
     TypeS = "[" + TypeS + "]";
   }
@@ -1528,6 +1556,7 @@ static const char *getTypeTraitName(UnaryTypeTrait UTT) {
   case UTT_IsFunction:              return "__is_function";
   case UTT_IsFundamental:           return "__is_fundamental";
   case UTT_IsIntegral:              return "__is_integral";
+  case UTT_IsInterfaceClass:        return "__is_interface_class";
   case UTT_IsLiteral:               return "__is_literal";
   case UTT_IsLvalueReference:       return "__is_lvalue_reference";
   case UTT_IsMemberFunctionPointer: return "__is_member_function_pointer";
@@ -1642,6 +1671,10 @@ void StmtPrinter::VisitSubstNonTypeTemplateParmPackExpr(
 void StmtPrinter::VisitSubstNonTypeTemplateParmExpr(
                                        SubstNonTypeTemplateParmExpr *Node) {
   Visit(Node->getReplacement());
+}
+
+void StmtPrinter::VisitFunctionParmPackExpr(FunctionParmPackExpr *E) {
+  OS << *E->getParameterPack();
 }
 
 void StmtPrinter::VisitMaterializeTemporaryExpr(MaterializeTemporaryExpr *Node){
@@ -1799,13 +1832,12 @@ void StmtPrinter::VisitAsTypeExpr(AsTypeExpr *Node) {
 // Stmt method implementations
 //===----------------------------------------------------------------------===//
 
-void Stmt::dumpPretty(ASTContext& Context) const {
-  printPretty(llvm::errs(), Context, 0,
-              PrintingPolicy(Context.getLangOpts()));
+void Stmt::dumpPretty(ASTContext &Context) const {
+  printPretty(llvm::errs(), 0, PrintingPolicy(Context.getLangOpts()));
 }
 
-void Stmt::printPretty(raw_ostream &OS, ASTContext& Context,
-                       PrinterHelper* Helper,
+void Stmt::printPretty(raw_ostream &OS,
+                       PrinterHelper *Helper,
                        const PrintingPolicy &Policy,
                        unsigned Indentation) const {
   if (this == 0) {
@@ -1813,12 +1845,12 @@ void Stmt::printPretty(raw_ostream &OS, ASTContext& Context,
     return;
   }
 
-  if (Policy.Dump && &Context) {
-    dump(OS, Context.getSourceManager());
+  if (Policy.DumpSourceManager) {
+    dump(OS, *Policy.DumpSourceManager);
     return;
   }
 
-  StmtPrinter P(OS, Context, Helper, Policy, Indentation);
+  StmtPrinter P(OS, Helper, Policy, Indentation);
   P.Visit(const_cast<Stmt*>(this));
 }
 

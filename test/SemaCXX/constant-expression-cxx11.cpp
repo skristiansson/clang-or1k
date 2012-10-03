@@ -1374,3 +1374,37 @@ namespace ConditionalLValToRVal {
   constexpr A a(4);
   static_assert(f(a).v == 4, "");
 }
+
+namespace TLS {
+  __thread int n;
+  int m;
+
+  constexpr bool b = &n == &n;
+
+  constexpr int *p = &n; // expected-error{{constexpr variable 'p' must be initialized by a constant expression}}
+
+  constexpr int *f() { return &n; }
+  constexpr int *q = f(); // expected-error{{constexpr variable 'q' must be initialized by a constant expression}}
+  constexpr bool c = f() == f();
+
+  constexpr int *g() { return &m; }
+  constexpr int *r = g();
+}
+
+namespace Void {
+  constexpr void f() { return; } // expected-error{{constexpr function's return type 'void' is not a literal type}}
+
+  void assert_failed(const char *msg, const char *file, int line); // expected-note {{declared here}}
+#define ASSERT(expr) ((expr) ? static_cast<void>(0) : assert_failed(#expr, __FILE__, __LINE__))
+  template<typename T, size_t S>
+  constexpr T get(T (&a)[S], size_t k) {
+    return ASSERT(k > 0 && k < S), a[k]; // expected-note{{non-constexpr function 'assert_failed'}}
+  }
+#undef ASSERT
+  template int get(int (&a)[4], size_t);
+  constexpr int arr[] = { 4, 1, 2, 3, 4 };
+  static_assert(get(arr, 1) == 1, "");
+  static_assert(get(arr, 4) == 4, "");
+  static_assert(get(arr, 0) == 4, ""); // expected-error{{not an integral constant expression}} \
+  // expected-note{{in call to 'get(arr, 0)'}}
+}
