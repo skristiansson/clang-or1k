@@ -1628,63 +1628,6 @@ void Bitrig::AddCXXStdlibLibArgs(const ArgList &Args,
   CmdArgs.push_back("-lstdc++");
 }
 
-/// OR1KLinux - Cross compile Linux tool chain for OpenRISC 1000 which can call
-/// as(1) and ld(1) directly.
-///
-OR1KLinux::OR1KLinux(const Driver &D, const llvm::Triple& Triple,
-                     const ArgList &Args)
-  : Generic_ELF(D, Triple, Args) {
-  const std::string &SysRoot = getDriver().SysRoot;
-
-  getFilePaths().push_back(SysRoot + "/usr/lib");
-  getFilePaths().push_back(SysRoot + "/lib");
-}
-
-Tool &OR1KLinux::SelectTool(const Compilation &C, const JobAction &JA,
-                            const ActionList &Inputs) const {
-  Action::ActionClass Key;
-  if (getDriver().ShouldUseClangCompiler(C, JA, getTriple()))
-    Key = Action::AnalyzeJobClass;
-  else
-    Key = JA.getKind();
-
-  bool UseIntegratedAs = C.getArgs().hasFlag(options::OPT_integrated_as,
-                                             options::OPT_no_integrated_as,
-                                             IsIntegratedAssemblerDefault());
-
-  Tool *&T = Tools[Key];
-  if (!T) {
-    switch (Key) {
-    case Action::AssembleJobClass: {
-      if (UseIntegratedAs)
-        T = new tools::ClangAs(*this);
-      else
-        T = new tools::or1klinux::Assemble(*this);
-      break;
-    }
-    case Action::LinkJobClass:
-      T = new tools::or1klinux::Link(*this); break;
-    default:
-      T = &Generic_GCC::SelectTool(C, JA, Inputs);
-    }
-  }
-
-  return *T;
-}
-
-void OR1KLinux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
-                                          ArgStringList &CC1Args) const {
-  const Driver &D = getDriver();
-
-  if (!DriverArgs.hasArg(options::OPT_nobuiltininc)) {
-    llvm::sys::Path P(D.ResourceDir);
-    P.appendComponent("include");
-    addSystemInclude(DriverArgs, CC1Args, P.str());
-  }
-  addExternCSystemInclude(DriverArgs, CC1Args, D.SysRoot + "/include");
-  addExternCSystemInclude(DriverArgs, CC1Args, D.SysRoot + "/usr/include");
-}
-
 /// FreeBSD - FreeBSD tool chain which can call as(1) and ld(1) directly.
 
 FreeBSD::FreeBSD(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
